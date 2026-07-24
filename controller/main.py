@@ -92,7 +92,7 @@ async def _fetch_pod_logs(pod_name: str, namespace: str, v1: k8s_client.CoreV1Ap
         )
         return logs
     except Exception:
-        pass
+        logger.debug("No previous logs available for %s/%s, falling back to current logs", namespace, pod_name)
     try:
         logs = await v1.read_namespaced_pod_log(
             name=pod_name,

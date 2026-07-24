@@ -1,0 +1,7 @@
+# Bandit configuration file for Python SAST scanning
+targets:
+  - controller
+skips: []
+exclude_dirs:
+  - .venv
+  - tests

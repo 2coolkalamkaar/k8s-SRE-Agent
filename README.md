@@ -162,7 +162,12 @@ The operator will automatically apply the fix to the Deployment and heal the wor
 
 ---
 
-## 🛡️ Security & Privacy
+## 🛡️ Security, Privacy & DevSecOps Pipeline
 
 - **100% Air-Gapped**: Runs entirely in-cluster. No external API calls or telemetry.
 - **Least Privilege RBAC**: Observer SA has read/CRD privileges; Executor SA only has patch rights on Deployments, StatefulSets, and ConfigMaps.
+- **Automated DevSecOps Pipeline (`.github/workflows/security-scan.yaml`)**:
+  - **SAST (Static Application Security Testing)**: Automated `Bandit` scans on Python operator code on every Pull Request.
+  - **SCA (Software Composition Analysis)**: Automated `pip-audit` vulnerability scanning on dependency trees (`requirements.txt`).
+  - **Trivy File & IaC Scan**: Automated `Trivy` scanning for Kubernetes manifest misconfigurations (`k8s/`), Dockerfile security anti-patterns, and filesystem secrets.
+

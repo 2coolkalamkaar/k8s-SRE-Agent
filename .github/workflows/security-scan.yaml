@@ -1,0 +1,78 @@
+name: 🛡️ DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ── Job 1: SAST (Static Application Security Testing - Bandit) ──────────────
+  sast-scan:
+    name: 🔍 SAST Scan (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit Security Analysis
+        run: |
+          bandit -r controller/ -v --exit-zero -f custom --msg-template "{abspath}:{line}: {severity}: {test_id}: {msg}"
+
+  # ── Job 2: SCA (Software Composition Analysis - Pip Audit) ───────────────────
+  sca-scan:
+    name: 📦 SCA Vulnerability Scan (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit Python Dependencies
+        run: |
+          pip-audit -r requirements.txt
+
+  # ── Job 3: Trivy Security Scan (IaC, Dockerfile & Filesystem Secrets) ───────
+  trivy-scan:
+    name: 🛡️ Trivy Security Scan (IaC & Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy Vulnerability Scanner (Repo Filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Run Trivy K8s Manifest & IaC Misconfig Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: 'k8s/'
+          format: 'table'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
