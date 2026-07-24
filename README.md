@@ -1,4 +1,4 @@
-# 🤖 Kubernetes AI SRE Agent
+#  Kubernetes AI SRE Agent
 
 An air-gapped, production-grade **Kubernetes AI SRE Operator** built using Python, [Kopf](https://kopf.readthedocs.io/), and in-cluster [Ollama](https://ollama.ai/) (`deepseek-coder:6.7b-instruct`).
 
@@ -6,7 +6,7 @@ The agent continuously observes cluster workloads, detects unhealthy pod states 
 
 ---
 
-## 🏗️ Infrastructure & Architecture
+##  Infrastructure & Architecture
 
 ```
                        ┌─────────────────────────────────────────┐
