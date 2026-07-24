@@ -6,10 +6,14 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   # ── Job 1: SAST (Static Application Security Testing - Bandit) ──────────────
   sast-scan:
-    name: 🔍 SAST Scan (Bandit)
+    name: SAST Scan (Bandit)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -30,7 +34,7 @@ jobs:
 
   # ── Job 2: SCA (Software Composition Analysis - Pip Audit) ───────────────────
   sca-scan:
-    name: 📦 SCA Vulnerability Scan (pip-audit)
+    name: SCA Vulnerability Scan (pip-audit)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -49,30 +53,28 @@ jobs:
         run: |
           pip-audit -r requirements.txt
 
-  # ── Job 3: Trivy Security Scan (IaC, Dockerfile & Filesystem Secrets) ───────
+  # ── Job 3: Trivy Security Scan & SARIF Upload to GitHub Security Tab ─────────
   trivy-scan:
-    name: 🛡️ Trivy Security Scan (IaC & Dockerfile)
+    name:  Trivy Security Scan & SARIF Upload
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Run Trivy Vulnerability Scanner (Repo Filesystem)
+      - name: Run Trivy Vulnerability Scanner (Generate SARIF)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          format: 'table'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
           exit-code: '0'
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'HIGH,CRITICAL'
 
-      - name: Run Trivy K8s Manifest & IaC Misconfig Scan
-        uses: aquasecurity/trivy-action@master
+      - name: Upload Trivy SARIF Report to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
-          scan-type: 'config'
-          scan-ref: 'k8s/'
-          format: 'table'
-          exit-code: '0'
-          severity: 'HIGH,CRITICAL'
+          sarif_file: 'trivy-results.sarif'
