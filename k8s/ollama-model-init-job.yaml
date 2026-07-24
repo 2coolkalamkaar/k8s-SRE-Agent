@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-pull-model
+  namespace: ai-infra
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      tolerations:
+        - key: "ai-specialist"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      containers:
+        - name: model-puller
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Ollama service to respond on http://ollama-service:11434..."
+              until curl -sf http://ollama-service.ai-infra.svc.cluster.local:11434/api/tags > /dev/null; do
+                echo "Ollama not ready yet. Retrying in 5 seconds..."
+                sleep 5
+              done
+              echo "Ollama is online! Pulling model deepseek-coder:6.7b-instruct..."
+              curl -X POST http://ollama-service.ai-infra.svc.cluster.local:11434/api/pull \
+                -d '{"name": "deepseek-coder:6.7b-instruct"}'
+              echo ""
+              echo "Model pull triggered successfully!"
+      restartPolicy: OnFailure

@@ -1,0 +1,24 @@
+# kind 3-node cluster configuration for K8s AI SRE Agent
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+name: sre-agent-cluster
+nodes:
+  # Control Plane Node
+  - role: control-plane
+
+  # Worker 1: Application Workloads Node
+  - role: worker
+    labels:
+      tier: production-apps
+
+  # Worker 2: AI Infrastructure Dedicated Node (Ollama)
+  - role: worker
+    labels:
+      tier: ai-infra
+    extraPortMappings:
+      - containerPort: 3000   # Grafana UI dashboard access
+        hostPort: 3000
+        listenAddress: "127.0.0.1"
+      - containerPort: 5432   # PostgreSQL DB access (optional debugging)
+        hostPort: 5432
+        listenAddress: "127.0.0.1"

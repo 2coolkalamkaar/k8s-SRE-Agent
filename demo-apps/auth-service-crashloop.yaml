@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: production
+  labels:
+    app: auth-service
+    tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-service
+  template:
+    metadata:
+      labels:
+        app: auth-service
+    spec:
+      priorityClassName: production-critical
+      containers:
+        - name: auth-service
+          image: busybox:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "[FATAL] Starting authentication service..."
+              echo "[FATAL] Connecting to database at db.production.svc.cluster.local:5432..."
+              if [ -z "$DB_PASSWORD" ]; then
+                echo "ERROR: Environment variable DB_PASSWORD is not set!"
+                echo "FATAL: Secret 'db-creds' missing or key 'DB_PASSWORD' not found."
+                echo "Exiting with failure code 1..."
+                exit 1
+              fi
+              echo "Connected successfully."
+              sleep 3600
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-creds         # Non-existent Secret!
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

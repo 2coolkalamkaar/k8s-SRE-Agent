@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-controller
+  namespace: monitoring
+  labels:
+    app: sre-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-controller
+  strategy:
+    type: Recreate          # Only 1 replica ever — prevents duplicate diagnoses
+  template:
+    metadata:
+      labels:
+        app: sre-controller
+    spec:
+      serviceAccountName: sre-observer-sa
+      priorityClassName: sre-monitoring
+      containers:
+        - name: controller
+          image: sre-controller:latest
+          imagePullPolicy: Never    # Uses kind load docker-image — no registry needed
+          env:
+            - name: OLLAMA_URL
+              value: "http://ollama-service.ai-infra.svc.cluster.local:11434"
+            - name: OLLAMA_MODEL
+              value: "deepseek-coder:6.7b-instruct"
+            - name: OLLAMA_TIMEOUT
+              value: "300"
+            - name: WATCH_NAMESPACES
+              value: "production"
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30

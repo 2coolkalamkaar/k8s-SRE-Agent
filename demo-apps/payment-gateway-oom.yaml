@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+  namespace: production
+  labels:
+    app: payment-gateway
+    tier: payment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+    spec:
+      priorityClassName: production-critical
+      containers:
+        - name: payment-gateway
+          image: python:3.11-alpine
+          command:
+            - python3
+            - -c
+            - |
+              import time, sys
+              print("[INFO] Payment Gateway starting up...")
+              print("[INFO] Allocating memory buffer for payment processing batch...")
+              try:
+                  # Force memory allocation to trigger OOMKilled
+                  buf = bytearray(128 * 1024 * 1024)  # 128 MB allocation
+                  print("[INFO] Memory buffer allocated successfully.")
+              except Exception as e:
+                  print(f"[CRITICAL] Allocation failed: {e}")
+                  sys.exit(1)
+              time.sleep(3600)
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "32Mi"              # Extremely low limit (32MB) -> Triggers OOMKilled!

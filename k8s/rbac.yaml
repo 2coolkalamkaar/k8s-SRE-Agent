@@ -1,0 +1,89 @@
+---
+# ── ServiceAccounts ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-observer-sa
+  namespace: monitoring
+  labels:
+    app: sre-controller
+---
+# sre-observer-sa: Full read access + CRD write (PatchRequest, IncidentRecord)
+# Intentionally NO write access to Deployments/Secrets — the executor does that.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre-observer-role
+rules:
+  # Core reads needed by the controller
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, namespaces, configmaps]
+    verbs: [get, list, watch, patch, update]   # patch needed by Kopf to write status annotations
+  # Read and patch deployments to trace pod → deployment ownership and apply approved patches
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets]
+    verbs: [get, list, watch, patch, update]
+  # Full CRD access for PatchRequest and IncidentRecord
+  - apiGroups: [sre.yourdomain.io]
+    resources: [patchrequests, patchrequests/status, incidentrecords]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Kopf's internal lease locking (leader election)
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Kopf needs events to record its own activity
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sre-observer-binding
+subjects:
+  - kind: ServiceAccount
+    name: sre-observer-sa
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: sre-observer-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ── Executor ServiceAccount (separate principle — least privilege) ─────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-executor-sa
+  namespace: monitoring
+  labels:
+    app: sre-controller
+---
+# sre-executor-sa: ONLY allowed to patch Deployments/StatefulSets/ConfigMaps
+# Explicitly cannot touch Secrets, RBAC, Nodes, or PersistentVolumes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre-executor-role
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, patch, update]
+  - apiGroups: [sre.yourdomain.io]
+    resources: [patchrequests, patchrequests/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sre-executor-binding
+subjects:
+  - kind: ServiceAccount
+    name: sre-executor-sa
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: sre-executor-role
+  apiGroup: rbac.authorization.k8s.io

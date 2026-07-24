@@ -1,0 +1,70 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: incidentrecords.sre.yourdomain.io
+spec:
+  group: sre.yourdomain.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                incidentId:       { type: string }
+                errorState:       { type: string }
+                errorFingerprint: { type: string }
+                targetDeployment: { type: string }
+                targetNamespace:  { type: string }
+                rootCause:        { type: string }
+                state:            { type: string, enum: [Open, Investigating, Resolved, Closed] }
+                recurrenceCount:  { type: integer }
+                tags:
+                  type: array
+                  items: { type: string }
+                llmDiagnosis:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                resolution:
+                  type: object
+                  properties:
+                    approvedBy:      { type: string }
+                    resolutionNotes: { type: string }
+                    worked:          { type: boolean }
+                    mttd:            { type: integer }
+                    mttr:            { type: integer }
+                    resolvedAt:      { type: string }
+                    patchApplied:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Incident ID
+          type: string
+          jsonPath: .spec.incidentId
+        - name: Deployment
+          type: string
+          jsonPath: .spec.targetDeployment
+        - name: Error
+          type: string
+          jsonPath: .spec.errorState
+        - name: State
+          type: string
+          jsonPath: .spec.state
+        - name: Recurrence
+          type: integer
+          jsonPath: .spec.recurrenceCount
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Cluster
+  names:
+    plural: incidentrecords
+    singular: incidentrecord
+    kind: IncidentRecord
+    shortNames: ["inc", "ir"]
