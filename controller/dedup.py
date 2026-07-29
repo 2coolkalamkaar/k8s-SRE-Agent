@@ -65,7 +65,7 @@ async def should_trigger(pod_uid: str, error_state: str) -> bool:
             if ts >= cutoff and st == error_state
         ]
         count = len(_event_window[pod_uid])
-        logger.debug("[dedup-L1] %s: %d/%d events in window", pod_uid, count, DAMPEN_COUNT)
+        logger.info("[dedup-L1] %s: %d/%d events in window (need %d to trigger)", pod_uid, count, DAMPEN_COUNT, DAMPEN_COUNT)
         return count >= DAMPEN_COUNT
 
 

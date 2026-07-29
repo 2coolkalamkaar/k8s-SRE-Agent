@@ -51,7 +51,7 @@ from controller.log_preprocessor import (
     make_fingerprint,
     preprocess_logs,
 )
-from controller.ollama_client import call_ollama
+from controller.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -316,16 +316,18 @@ async def on_pod_status_change(body, name, namespace, new, logger, **kwargs):
 
     deployment_name = _get_owner_deployment(body)
     if not deployment_name:
-        logger.debug("Could not determine deployment for pod %s/%s, skipping", namespace, name)
+        logger.info("[handler] Could not determine deployment for pod %s/%s, skipping", namespace, name)
         return
 
     pod_uid = body["metadata"].get("uid", name)
+    logger.info("[handler] %s/%s → error_state=%s deployment=%s uid=%s", namespace, name, error_state, deployment_name, pod_uid)
 
     # ── Layer 1: Event Dampening ────────────────────────────────────────────
     if not await should_trigger(pod_uid, error_state):
-        logger.debug("[dedup-L1] %s/%s: not yet persistent enough, skipping", namespace, name)
+        logger.info("[dedup-L1] %s/%s: not yet persistent enough, skipping", namespace, name)
         return
 
+    logger.info("[dedup-L1] ✅ %s/%s: dampening threshold crossed — queuing diagnosis pipeline", namespace, name)
     await asyncio.create_task(
         _run_diagnosis_pipeline(
             pod_name=name,
@@ -396,7 +398,7 @@ async def _run_diagnosis_pipeline(
             incident_id, namespace, deployment_name, error_state,
         )
 
-        diagnosis = await call_ollama(
+        diagnosis = await call_llm(
             pod_context=pod_context,
             cleaned_logs=cleaned_logs,
             events=events_text,

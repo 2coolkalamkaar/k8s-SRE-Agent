@@ -24,6 +24,20 @@ spec:
           image: sre-controller:latest
           imagePullPolicy: Never    # Uses kind load docker-image — no registry needed
           env:
+            - name: LLM_PROVIDER
+              value: "auto"
+            - name: VERTEX_PROJECT
+              value: "project-036ddc82-f451-4fae-9e3"
+            - name: VERTEX_LOCATION
+              value: "us-central1"
+            - name: VERTEX_MODEL
+              value: "gemini-2.5-flash"
+            - name: VERTEX_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sre-llm-secret
+                  key: vertex-token
+                  optional: true
             - name: OLLAMA_URL
               value: "http://ollama-service.ai-infra.svc.cluster.local:11434"
             - name: OLLAMA_MODEL

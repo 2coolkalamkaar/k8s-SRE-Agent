@@ -136,8 +136,10 @@ def detect_error_state(container_statuses: list[dict]) -> str | None:
         if terminated.get("reason") == "OOMKilled":
             return "OOMKilled"
 
-        # Generic non-zero exit
+        # Generic non-zero exit — normalise to CrashLoopBackOff so the dampening
+        # window counter accumulates even when kubelet alternates between the
+        # terminated phase (exitCode != 0) and the waiting phase (CrashLoopBackOff).
         if terminated.get("exitCode", 0) not in (0, None):
-            return "ContainerCrashed"
+            return "CrashLoopBackOff"
 
     return None

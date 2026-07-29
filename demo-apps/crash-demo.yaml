@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash-demo
+  namespace: production
+  labels:
+    app: crash-demo
+    team: sre-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crash-demo
+  template:
+    metadata:
+      labels:
+        app: crash-demo
+    spec:
+      containers:
+        - name: crash-demo
+          image: python:3.11-alpine
+          command:
+            - python3
+            - -c
+            - |
+              import time, sys
+              print("[INFO] crash-demo service starting...")
+              print("[INFO] Loading configuration from /etc/app/config.yaml...")
+              time.sleep(2)
+              print("[ERROR] FileNotFoundError: /etc/app/config.yaml not found!")
+              print("[FATAL] Cannot start without configuration. Exiting.")
+              sys.exit(1)
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
