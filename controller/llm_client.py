@@ -20,6 +20,12 @@ import time
 
 import httpx
 
+try:
+    from google import genai
+    GENAI_SDK_AVAILABLE = True
+except ImportError:
+    GENAI_SDK_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # ── Environment Configuration ──────────────────────────────────────────────────
@@ -190,26 +196,35 @@ def _safe_default(reason: str) -> dict:
     }
 
 
-# ── Provider 1: GCP Vertex AI (Consumes $300 GCP Credits) ─────────────────────
+# ── Provider 1: GCP Vertex AI (google-genai SDK with vertexai=True) ───────────
 
-def _get_vertex_token() -> str | None:
-    """Retrieve gcloud Application Default Credentials access token."""
-    token_env = os.getenv("VERTEX_ACCESS_TOKEN", "").strip()
-    if token_env:
-        return token_env
+_vertex_client: genai.Client | None = None
+
+
+def _get_vertex_client() -> genai.Client | None:
+    """Initialize and return singleton google-genai Client configured for Vertex AI."""
+    global _vertex_client
+    if _vertex_client is not None:
+        return _vertex_client
+    if not GENAI_SDK_AVAILABLE:
+        return None
     try:
-        return subprocess.check_output(
-            ["gcloud", "auth", "application-default", "print-access-token"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except Exception:
-        try:
-            return subprocess.check_output(
-                ["gcloud", "auth", "print-access-token"],
-                stderr=subprocess.DEVNULL,
-            ).decode().strip()
-        except Exception:
-            return None
+        adc_path = os.getenv(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "/etc/gcp/credentials.json"
+        )
+        if os.path.exists(adc_path) and "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = adc_path
+
+        _vertex_client = genai.Client(
+            vertexai=True,
+            project=VERTEX_PROJECT,
+            location=VERTEX_LOCATION,
+        )
+        return _vertex_client
+    except Exception as exc:
+        logger.warning("Failed to initialize Vertex AI genai client: %s", exc)
+        return None
 
 
 async def call_vertex_ai(
@@ -220,67 +235,31 @@ async def call_vertex_ai(
     past_incidents: list[dict] | None = None,
 ) -> dict | None:
     """
-    Call GCP Vertex AI REST API (gemini-2.5-flash).
+    Call GCP Vertex AI using official google-genai SDK (gemini-2.5-flash).
     Uses GCP $300 credits — completes in ~3.9 seconds.
     """
-    token = _get_vertex_token()
-    if not token:
-        logger.warning("[%s] Vertex AI token not available", incident_id)
+    client = _get_vertex_client()
+    if not client:
+        logger.warning("[%s] Vertex AI client not available", incident_id)
         return None
 
     prompt = build_prompt(pod_context, cleaned_logs, events, past_incidents)
-    url = (
-        f"https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/"
-        f"{VERTEX_PROJECT}/locations/{VERTEX_LOCATION}/publishers/google/models/"
-        f"{VERTEX_MODEL}:generateContent"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}],
-            }
-        ]
-    }
-
     logger.info("[%s] 🚀 Sending request to GCP Vertex AI (%s)", incident_id, VERTEX_MODEL)
     t_start = time.monotonic()
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                url,
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {token}",
-                },
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model=VERTEX_MODEL,
+                contents=prompt,
             )
-
-            if resp.status_code != 200:
-                logger.warning(
-                    "[%s] Vertex AI returned HTTP %d: %s",
-                    incident_id, resp.status_code, resp.text[:200]
-                )
-                return None
-
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                logger.warning("[%s] Vertex AI returned no candidates", incident_id)
-                return None
-
-            parts = candidates[0].get("content", {}).get("parts", [])
-            if not parts:
-                logger.warning("[%s] Vertex AI candidate content empty", incident_id)
-                return None
-
-            raw_text = parts[0].get("text", "")
-            elapsed = time.monotonic() - t_start
-            logger.info("[%s] ⚡ Vertex AI responded in %.2fs!", incident_id, elapsed)
-            return parse_llm_response(raw_text, incident_id)
-
+        )
+        raw_text = response.text or ""
+        elapsed = time.monotonic() - t_start
+        logger.info("[%s] ⚡ Vertex AI responded in %.2fs!", incident_id, elapsed)
+        return parse_llm_response(raw_text, incident_id)
     except Exception as exc:
         logger.warning("[%s] Vertex AI request error: %s", incident_id, exc)
         return None
@@ -413,8 +392,8 @@ async def call_llm(
     """
     provider = LLM_PROVIDER
     if provider == "auto":
-        # Check if Vertex AI token is available
-        if _get_vertex_token():
+        # Check if Vertex AI client is available
+        if _get_vertex_client():
             provider = "vertex"
         elif GEMINI_API_KEY:
             provider = "gemini"

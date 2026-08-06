@@ -251,7 +251,9 @@ async def catch_up_scan(logger: logging.Logger, **kwargs):
     have been missed during controller downtime (Gotcha #7).
     """
     logger.info("🔍 Running startup catch-up scan for missed events...")
+    logger.info("Calling _ensure_k8s_configured...")
     await _ensure_k8s_configured()
+    logger.info("_ensure_k8s_configured done")
 
     v1 = k8s_client.CoreV1Api()
     custom_api = k8s_client.CustomObjectsApi()
@@ -259,7 +261,9 @@ async def catch_up_scan(logger: logging.Logger, **kwargs):
 
     for ns in WATCH_NAMESPACES:
         try:
+            logger.info(f"Listing pods in namespace {ns}...")
             pods = await v1.list_namespaced_pod(namespace=ns)
+            logger.info(f"Got {len(pods.items)} pods in namespace {ns}")
             for pod in pods.items:
                 container_statuses = pod.status.container_statuses or []
                 cs_list = [cs.to_dict() for cs in container_statuses]

@@ -166,7 +166,7 @@ async def increment_seen_count(
             namespace=namespace,
             plural="patchrequests",
             name=pr_name,
-            body={"spec": {"seenCount": seen}},
+            body=[{"op": "replace", "path": "/spec/seenCount", "value": seen}],
         )
         logger.info("[dedup-L3] Incremented seenCount on %s → %d", pr_name, seen)
         if seen in (10, 25, 50):
