@@ -17,7 +17,7 @@ metadata:
 rules:
   # Core reads needed by the controller
   - apiGroups: [""]
-    resources: [pods, pods/log, events, namespaces, configmaps]
+    resources: [pods, pods/log, pods/status, events, namespaces, configmaps]
     verbs: [get, list, watch, patch, update]   # patch needed by Kopf to write status annotations
   # Read and patch deployments to trace pod → deployment ownership and apply approved patches
   - apiGroups: [apps]

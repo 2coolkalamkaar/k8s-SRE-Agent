@@ -20,35 +20,21 @@ This document presents a step-by-step account of the design, setup, implementati
 
 The AI SRE Agent is a Kopf-based Kubernetes operator designed to run **100% air-gapped** inside a Kubernetes cluster. It continuously observes workloads, diagnoses container failures using an in-cluster LLM (`deepseek-coder:6.7b-instruct`), deduplicates crash events, and manages remediation through human-approved Custom Resource Definitions (`PatchRequest`).
 
-```
-                                  +---------------------------------------+
-                                  |        Kubernetes API Server          |
-                                  +-------------------+-------------------+
-                                                      |
-                                        Pod Events /  |  Patch Deployments
-                                        Status Watch  |  (Post SRE Approval)
-                                                      v
- ┌────────────────────────────────────────────────────────────────────────────────────────┐
- │                                   SRE Controller                                       │
- │                                                                                        │
- │  ┌──────────────────────┐    ┌─────────────────────────┐    ┌───────────────────────┐  │
- │  │ Layer 1: Dampening   ├───►│ Layer 2: Fingerprint    ├───►│ Layer 3: Active       │  │
- │  │ (3 events / 5 min)   │    │ Cache (1h/4h TTL)       │    │ PR API Check          │  │
- │  └──────────────────────┘    └─────────────────────────┘    └───────────┬───────────┘  │
- └─────────────────────────────────────────────────────────────────────────┼──────────────┘
-                                                                           │ All passed
-                                                                           v
- ┌──────────────────────────────────────────────┐              ┌──────────────────────────┐
- │              In-Cluster Ollama               │              │   PatchRequest CRD       │
- │  Node: worker2 (Tainted: node-role=ai-infra) │◄─────────────┤   Status: Pending        │
- │  Model: deepseek-coder:6.7b-instruct        │              └────────────┬─────────────┘
- └──────────────────────────────────────────────┘                           │
-                                                                            │ SRE Approves
-                                                                            v
-                                                               ┌──────────────────────────┐
-                                                               │  Kopf Executor Handler   │
-                                                               │  Applies patch to Pod    │
-                                                               └──────────────────────────┘
+```mermaid
+flowchart TD
+    A[Kubernetes API Server] -->|Pod Events / Status Watch| B[SRE Controller - Kopf]
+    
+    subgraph Deduplication Pipeline
+        B --> C[Layer 1: Event Dampening\n3 events / 5 min]
+        C --> D[Layer 2: Fingerprint Cache\nSHA-256 Hash 1h/4h TTL]
+        D --> E[Layer 3: Active PR API Check\nSurvives Controller Restarts]
+    end
+
+    E -->|Passes All 3 Layers| F[In-Cluster Ollama\ndeepseek-coder:6.7b-instruct]
+    F -->|Parsed JSON Diagnosis| G[Create PatchRequest CRD\nStatus: Pending]
+    
+    G -->|Human Approval via kubectl| H[Kopf Executor Handler]
+    H -->|Applies Proposed Patch| A
 ```
 
 ---

@@ -27,6 +27,7 @@ except ImportError:
     GENAI_SDK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+import controller.telemetry as telemetry
 
 # ── Environment Configuration ──────────────────────────────────────────────────
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").lower()  # auto | vertex | gemini | ollama
@@ -392,7 +393,6 @@ async def call_llm(
     """
     provider = LLM_PROVIDER
     if provider == "auto":
-        # Check if Vertex AI client is available
         if _get_vertex_client():
             provider = "vertex"
         elif GEMINI_API_KEY:
@@ -400,17 +400,53 @@ async def call_llm(
         else:
             provider = "ollama"
 
-    if provider == "vertex":
-        result = await call_vertex_ai(pod_context, cleaned_logs, events, incident_id, past_incidents)
-        if result is not None:
-            return result
-        logger.info("[%s] Vertex AI provider failed — trying fallback provider...", incident_id)
+    tracer = telemetry.get_tracer()
+    model = VERTEX_MODEL if provider == "vertex" else OLLAMA_MODEL
+    start = time.time()
+    with tracer.start_as_current_span(
+        "sre.llm.call",
+        attributes={
+            "provider": provider,
+            "model": model,
+            "incident.id": incident_id,
+        },
+    ) as llm_span:
+        try:
+            if provider == "vertex":
+                result = await call_vertex_ai(pod_context, cleaned_logs, events, incident_id, past_incidents)
+                if result is not None:
+                    duration = time.time() - start
+                    llm_span.set_attribute("duration_seconds", round(duration, 2))
+                    llm_span.set_attribute("success", True)
+                    if telemetry.llm_duration_histogram:
+                        telemetry.llm_duration_histogram.record(duration, {"provider": provider, "model": model})
+                    return result
+                logger.info("[%s] Vertex AI provider failed — trying fallback provider...", incident_id)
 
-    if provider in ("gemini", "vertex"):
-        result = await call_gemini(pod_context, cleaned_logs, events, incident_id, past_incidents)
-        if result is not None:
-            return result
-        logger.info("[%s] Cloud providers unavailable or failed — falling back to local Ollama...", incident_id)
+            if provider in ("gemini", "vertex"):
+                result = await call_gemini(pod_context, cleaned_logs, events, incident_id, past_incidents)
+                if result is not None:
+                    duration = time.time() - start
+                    llm_span.set_attribute("duration_seconds", round(duration, 2))
+                    llm_span.set_attribute("success", True)
+                    if telemetry.llm_duration_histogram:
+                        telemetry.llm_duration_histogram.record(duration, {"provider": "gemini", "model": "gemini-api"})
+                    return result
+                logger.info("[%s] Cloud providers unavailable or failed — falling back to local Ollama...", incident_id)
 
-    # Final fallback or explicit Ollama execution
-    return await call_ollama(pod_context, cleaned_logs, events, incident_id, past_incidents)
+            # Final fallback or explicit Ollama execution
+            result = await call_ollama(pod_context, cleaned_logs, events, incident_id, past_incidents)
+            duration = time.time() - start
+            llm_span.set_attribute("duration_seconds", round(duration, 2))
+            llm_span.set_attribute("success", True)
+            if telemetry.llm_duration_histogram:
+                telemetry.llm_duration_histogram.record(duration, {"provider": "ollama", "model": OLLAMA_MODEL})
+            return result
+
+        except Exception as exc:
+            duration = time.time() - start
+            llm_span.record_exception(exc)
+            llm_span.set_attribute("success", False)
+            if telemetry.llm_errors_counter:
+                telemetry.llm_errors_counter.add(1, {"provider": provider, "reason": type(exc).__name__})
+            raise

@@ -7,3 +7,8 @@ sqlalchemy[asyncio]==2.0.31
 pydantic>=2.9.0
 prometheus_client==0.20.0
 google-genai>=2.0.0
+# OpenTelemetry — Tracing (→ Grafana Tempo) + Metrics (→ Prometheus)
+opentelemetry-sdk>=1.25.0
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0
+opentelemetry-exporter-prometheus>=0.46b0
+opentelemetry-instrumentation-httpx>=0.46b0

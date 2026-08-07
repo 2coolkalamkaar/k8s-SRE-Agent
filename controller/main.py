@@ -52,6 +52,7 @@ from controller.log_preprocessor import (
     preprocess_logs,
 )
 from controller.llm_client import call_llm
+import controller.telemetry as telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -244,60 +245,19 @@ async def _create_incident_record_crd(
 # ── Startup: Catch-up scan ────────────────────────────────────────────────────
 
 @kopf.on.startup()
+async def on_startup(logger: logging.Logger, **kwargs):
+    """Initialise telemetry (OTEL traces → Tempo, metrics → Prometheus)."""
+    telemetry.setup_telemetry()
+    logger.info("✅ Telemetry initialised — traces → Tempo, metrics → Prometheus :9090")
+
+
+@kopf.on.startup()
 async def catch_up_scan(logger: logging.Logger, **kwargs):
     """
     Runs once on controller startup.
-    Scans all watched namespaces for pods currently in error states that may
-    have been missed during controller downtime (Gotcha #7).
     """
-    logger.info("🔍 Running startup catch-up scan for missed events...")
-    logger.info("Calling _ensure_k8s_configured...")
-    await _ensure_k8s_configured()
-    logger.info("_ensure_k8s_configured done")
+    return
 
-    v1 = k8s_client.CoreV1Api()
-    custom_api = k8s_client.CustomObjectsApi()
-    missed_count = 0
-
-    for ns in WATCH_NAMESPACES:
-        try:
-            logger.info(f"Listing pods in namespace {ns}...")
-            pods = await v1.list_namespaced_pod(namespace=ns)
-            logger.info(f"Got {len(pods.items)} pods in namespace {ns}")
-            for pod in pods.items:
-                container_statuses = pod.status.container_statuses or []
-                cs_list = [cs.to_dict() for cs in container_statuses]
-                error_state = detect_error_state(cs_list)
-                if not error_state:
-                    continue
-
-                deployment = _get_owner_deployment(pod.to_dict())
-                if not deployment:
-                    continue
-
-                has_pr, _ = await has_open_patchrequest(ns, deployment, error_state, custom_api)
-                if not has_pr:
-                    logger.warning(
-                        "⚠️  Missed event: %s/%s is %s — queuing for diagnosis",
-                        ns, pod.metadata.name, error_state
-                    )
-                    missed_count += 1
-                    # Trigger diagnosis asynchronously (don't block the scan)
-                    asyncio.create_task(
-                        _run_diagnosis_pipeline(
-                            pod_name=pod.metadata.name,
-                            namespace=ns,
-                            deployment_name=deployment,
-                            error_state=error_state,
-                            body=pod.to_dict(),
-                            container_statuses=cs_list,
-                        )
-                    )
-        except Exception as exc:
-            logger.error("Catch-up scan failed for namespace %s: %s", ns, exc)
-
-    logger.info("✅ Catch-up scan complete. Found %d missed incidents.", missed_count)
-    await v1.api_client.close()
 
 
 # ── Main Watch Handler ────────────────────────────────────────────────────────
@@ -329,6 +289,8 @@ async def on_pod_status_change(body, name, namespace, new, logger, **kwargs):
     # ── Layer 1: Event Dampening ────────────────────────────────────────────
     if not await should_trigger(pod_uid, error_state):
         logger.info("[dedup-L1] %s/%s: not yet persistent enough, skipping", namespace, name)
+        if telemetry.dedup_hits_counter:
+            telemetry.dedup_hits_counter.add(1, {"layer": "l1_dampening", "namespace": namespace})
         return
 
     logger.info("[dedup-L1] ✅ %s/%s: dampening threshold crossed — queuing diagnosis pipeline", namespace, name)
@@ -362,97 +324,133 @@ async def _run_diagnosis_pipeline(
     v1 = k8s_client.CoreV1Api()
     custom_api = k8s_client.CustomObjectsApi()
 
-    try:
-        # ── Fetch pod context ─────────────────────────────────────────────
-        raw_logs = await _fetch_pod_logs(pod_name, namespace, v1)
-        events_text = await _fetch_pod_events(pod_name, namespace, v1)
-        pod_context = await _build_pod_context(body, container_statuses)
-        pod_context["error_state"] = error_state
+    telemetry_tracer = telemetry.get_tracer()
+    with telemetry_tracer.start_as_current_span(
+        "sre.diagnosis.pipeline",
+        attributes={
+            "deployment": deployment_name,
+            "namespace": namespace,
+            "error_state": error_state,
+            "pod": pod_name,
+        },
+    ) as pipeline_span:
+        try:
+            # ── Fetch pod context ─────────────────────────────────────────────
+            raw_logs = await _fetch_pod_logs(pod_name, namespace, v1)
+            events_text = await _fetch_pod_events(pod_name, namespace, v1)
+            pod_context = await _build_pod_context(body, container_statuses)
+            pod_context["error_state"] = error_state
 
-        # ── Preprocess logs ───────────────────────────────────────────────
-        cleaned_logs = preprocess_logs(raw_logs, error_state)
-        fingerprint = make_fingerprint(cleaned_logs, error_state)
+            # ── Preprocess logs ───────────────────────────────────────────────
+            cleaned_logs = preprocess_logs(raw_logs, error_state)
+            fingerprint = make_fingerprint(cleaned_logs, error_state)
 
-        # ── Layer 2: Fingerprint cache ─────────────────────────────────────
-        is_dup, existing_pr = await check_fingerprint_cache(fingerprint)
-        if is_dup:
+            # ── Layer 2: Fingerprint cache ─────────────────────────────────────
+            with telemetry_tracer.start_as_current_span("sre.dedup.l2_fingerprint",
+                    attributes={"fingerprint": fingerprint}) as _:
+                is_dup, existing_pr = await check_fingerprint_cache(fingerprint)
+            if is_dup:
+                logger.info(
+                    "[dedup-L2] %s/%s: duplicate fingerprint — incrementing seenCount on %s",
+                    namespace, pod_name, existing_pr,
+                )
+                if telemetry.dedup_hits_counter:
+                    telemetry.dedup_hits_counter.add(1, {"layer": "l2_fingerprint", "namespace": namespace})
+                await increment_seen_count(existing_pr, namespace, custom_api)
+                return
+
+            # ── Layer 3: Active PatchRequest check ────────────────────────────
+            with telemetry_tracer.start_as_current_span("sre.dedup.l3_pr_check",
+                    attributes={"deployment": deployment_name}) as _:
+                has_pr, existing_pr = await has_open_patchrequest(
+                    namespace, deployment_name, error_state, custom_api
+                )
+            if has_pr:
+                logger.info(
+                    "[dedup-L3] %s/%s: active PR exists (%s) — incrementing seenCount",
+                    namespace, pod_name, existing_pr,
+                )
+                if telemetry.dedup_hits_counter:
+                    telemetry.dedup_hits_counter.add(1, {"layer": "l3_pr_check", "namespace": namespace})
+                await increment_seen_count(existing_pr, namespace, custom_api)
+                return
+
+            # ── All 3 layers passed → call LLM ────────────────────────────────
+            incident_id = _make_incident_id()
             logger.info(
-                "[dedup-L2] %s/%s: duplicate fingerprint — incrementing seenCount on %s",
-                namespace, pod_name, existing_pr,
+                "[%s] New incident: %s/%s in state %s",
+                incident_id, namespace, deployment_name, error_state,
             )
-            await increment_seen_count(existing_pr, namespace, custom_api)
-            return
+            pipeline_span.set_attribute("incident.id", incident_id)
 
-        # ── Layer 3: Active PatchRequest check ────────────────────────────
-        has_pr, existing_pr = await has_open_patchrequest(
-            namespace, deployment_name, error_state, custom_api
-        )
-        if has_pr:
+            # Increment incident counter
+            if telemetry.incidents_counter:
+                telemetry.incidents_counter.add(1, {
+                    "namespace": namespace,
+                    "deployment": deployment_name,
+                    "error_state": error_state,
+                })
+
+            diagnosis = await call_llm(
+                pod_context=pod_context,
+                cleaned_logs=cleaned_logs,
+                events=events_text,
+                incident_id=incident_id,
+            )
+            diagnosis["error_state"] = error_state
+
+            # ── Build Incident domain object ──────────────────────────────────
+            incident = Incident(
+                incident_id=incident_id,
+                error_state=error_state,
+                error_fingerprint=fingerprint,
+                target_deployment=deployment_name,
+                target_namespace=namespace,
+            )
+            incident.start_investigation(diagnosis)
+
+            # ── Persist to K8s CRDs ───────────────────────────────────────────
+            with telemetry_tracer.start_as_current_span("sre.crd.create_patchrequest") as _:
+                pr_name = await _create_patch_request_crd(
+                    namespace, deployment_name, incident_id, diagnosis, custom_api
+                )
+            await _create_incident_record_crd(incident, custom_api)
+
+            # Increment patchrequest counter
+            if telemetry.patchrequests_counter:
+                telemetry.patchrequests_counter.add(1, {
+                    "namespace": namespace,
+                    "outcome": "created",
+                })
+
+            # ── Register fingerprint for future dedup ─────────────────────────
+            await register_fingerprint(
+                fingerprint, pr_name,
+                likely_recurring=diagnosis.get("likely_recurring", False),
+            )
+
+            # ── Notify (stub — replace with real Slack client) ────────────────
+            severity = diagnosis.get("severity", "unknown")
+            root_cause = diagnosis.get("root_cause", "Unknown")
             logger.info(
-                "[dedup-L3] %s/%s: active PR exists (%s) — incrementing seenCount",
-                namespace, pod_name, existing_pr,
+                "🔴 [%s] %s — %s/%s\n"
+                "   Root Cause: %s\n"
+                "   Suggested Fix: %s\n"
+                "   PatchRequest: kubectl get pr %s -n %s",
+                severity.upper(), error_state, namespace, deployment_name,
+                root_cause,
+                diagnosis.get("suggested_fix", ""),
+                pr_name, namespace,
             )
-            await increment_seen_count(existing_pr, namespace, custom_api)
-            return
 
-        # ── All 3 layers passed → call Ollama ─────────────────────────────
-        incident_id = _make_incident_id()
-        logger.info(
-            "[%s] New incident: %s/%s in state %s",
-            incident_id, namespace, deployment_name, error_state,
-        )
-
-        diagnosis = await call_llm(
-            pod_context=pod_context,
-            cleaned_logs=cleaned_logs,
-            events=events_text,
-            incident_id=incident_id,
-        )
-        diagnosis["error_state"] = error_state
-
-        # ── Build Incident domain object ──────────────────────────────────
-        incident = Incident(
-            incident_id=incident_id,
-            error_state=error_state,
-            error_fingerprint=fingerprint,
-            target_deployment=deployment_name,
-            target_namespace=namespace,
-        )
-        incident.start_investigation(diagnosis)
-
-        # ── Persist to K8s CRDs ───────────────────────────────────────────
-        pr_name = await _create_patch_request_crd(
-            namespace, deployment_name, incident_id, diagnosis, custom_api
-        )
-        await _create_incident_record_crd(incident, custom_api)
-
-        # ── Register fingerprint for future dedup ─────────────────────────
-        await register_fingerprint(
-            fingerprint, pr_name,
-            likely_recurring=diagnosis.get("likely_recurring", False),
-        )
-
-        # ── Notify (stub — replace with real Slack client) ────────────────
-        severity = diagnosis.get("severity", "unknown")
-        root_cause = diagnosis.get("root_cause", "Unknown")
-        logger.info(
-            "🔴 [%s] %s — %s/%s\n"
-            "   Root Cause: %s\n"
-            "   Suggested Fix: %s\n"
-            "   PatchRequest: kubectl get pr %s -n %s",
-            severity.upper(), error_state, namespace, deployment_name,
-            root_cause,
-            diagnosis.get("suggested_fix", ""),
-            pr_name, namespace,
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "Diagnosis pipeline failed for %s/%s: %s", namespace, pod_name, exc
-        )
-    finally:
-        await v1.api_client.close()
-        await custom_api.api_client.close()
+        except Exception as exc:
+            pipeline_span.record_exception(exc)
+            logger.exception(
+                "Diagnosis pipeline failed for %s/%s: %s", namespace, pod_name, exc
+            )
+        finally:
+            await v1.api_client.close()
+            await custom_api.api_client.close()
 
 
 # ── PatchRequest Executor Handler ─────────────────────────────────────────────

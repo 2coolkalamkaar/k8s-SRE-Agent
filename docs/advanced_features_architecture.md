@@ -68,11 +68,12 @@ While standard autonomous agents stop at basic log analysis and manual patch cre
 
 ---
 
-### 3️⃣ Module 3: Prometheus Metrics Exporter & Operational Observability
+### 3️⃣ Module 3: Prometheus Metrics & Distributed Tracing (Observability Stack)
 
 #### What We Will Add
-- **Component**: `controller/metrics.py` (Prometheus Metrics Exporter integrated into the controller).
-- **Exposed Port**: `/metrics` HTTP endpoint on port `8080` scraped by Prometheus every 15s.
+- **Component**: `controller/telemetry.py` (OpenTelemetry integration).
+- **Exposed Port**: `/metrics` HTTP endpoint on port `9090` scraped by Prometheus.
+- **Distributed Tracing**: OTLP exports to Grafana Tempo, tracing the entire `sre.diagnosis.pipeline` and automatically capturing child spans for LLM API calls via `httpx` instrumentation.
 - **Key Metrics Tracked**:
   ```prometheus
   # Total incidents detected by state and error classification
@@ -93,9 +94,13 @@ While standard autonomous agents stop at basic log analysis and manual patch cre
   sre_agent_remediations_total{action="rollback", outcome="triggered"} 1
   ```
 
+  ```
+
 #### Infrastructure Changes
-- **ServiceMonitor Manifest**: Add `ServiceMonitor` for Prometheus Operator / VictoriaMetrics scraping.
-- **Grafana Dashboard**: Importable JSON Grafana dashboard visualizing MTTR, LLM latency distribution, active incidents map, and dedup savings ratio.
+- **Observability Stack**: Deployed in `observability` namespace: Prometheus (metrics), Grafana Tempo (traces), and Grafana (dashboards).
+- **Grafana Dashboards**: Pre-provisioned dashboards mapping metrics and linking them to Tempo traces seamlessly:
+  - **SRE Overview**: Total incidents, dedup savings, incidents by namespace.
+  - **LLM Performance**: p50/p95 LLM latencies, LLM call heatmaps, and error rates.
 
 #### Technical & Interview Impact
 - **SRE Value**: Provides full telemetry into the AI operator itself. Allows SRE leads to measure exact ROI (e.g., *"Saved 85% of LLM calls via 3-layer dedup"* and *"Reduced MTTR from 45 min to 4.2 min"*).
@@ -165,82 +170,3 @@ flowchart TD
 | **Module 2: RAG Incident Memory** | PostgreSQL 15 StatefulSet, `asyncpg` vector search | Reduces LLM hallucination; speeds up recurring diagnoses | Shows advanced AI engineering beyond simple prompting |
 | **Module 3: Prometheus Observability** | `/metrics` endpoint, Grafana JSON dashboard | Quantifies SRE ROI, MTTR reduction, and LLM cost savings | Proves deep alignment with standard DevOps/SRE tooling |
 | **Module 4: GitOps PR Engine** | GitHub API integration, `gitops-secret` mount | Enforces Infrastructure-as-Code & zero cluster drift | Appeals directly to enterprise managers using ArgoCD/Flux |
-
----
-
-## 🎯 Recommended Execution Plan
-
-1. **Step 1**: Build **Module 1 (Outcome Checker & Automated Rollback)** to establish closed-loop reliability.
-2. **Step 2**: Implement **Module 3 (Prometheus Metrics Exporter + Grafana)** to make system telemetry visible and measurable.
-3. **Step 3**: Implement **Module 2 (RAG Incident Memory)** over PostgreSQL to reduce LLM hallucinations.
-4. **Step 4**: Add **Module 4 (GitOps PR Engine)** for enterprise policy compliance.
-5. **Step 5**: Build **Module 5 (Custom Incident Approval UI)** as the final user-facing layer.
-
----
-
-### 5️⃣ Module 5: Visibility Layer — Observability vs. Custom UI
-
-This module covers the two major directions for adding **visibility** to the platform and the recommended strategy for each.
-
-#### Option A: Prometheus + Grafana (Recommended First)
-
-This is the most impactful and fastest path for making the system **operationally observable**. This is not a replacement for a UI — it is the **data foundation** that a future UI will also be built on.
-
-**What to build:**
-- `controller/metrics.py` — Expose a `/metrics` HTTP endpoint using the `prometheus_client` library (already in `requirements.txt`).
-- A `ServiceMonitor` CRD to configure Prometheus scraping.
-- An importable **Grafana JSON Dashboard** with panels for:
-  - 📈 Active Incidents by Namespace & Error State
-  - ⏱️ LLM Inference Latency (Gemini response time histogram)
-  - 🔁 Deduplication Hit Rate (L1 / L2 / L3 savings breakdown)
-  - 🧯 MTTR (Mean Time to Resolution) Histogram
-  - ✅ Remediation Outcomes (Applied vs. Rolled Back vs. Rejected)
-
-**Why before a custom UI:**
-| Reason | Detail |
-|---|---|
-| ✅ Already planned | Directly maps to Module 3 in this doc |
-| ✅ Zero UI code needed | Grafana is a full dashboard product |
-| ✅ Native SRE tooling | Standard in every production SRE team |
-| ✅ Enables the UI later | The UI will consume these same metrics via the Prometheus HTTP API |
-
-#### Option B: SigNoz (Full-Stack Observability Alternative)
-
-**SigNoz** is an open-source alternative that replaces the Prometheus + Grafana + Loki stack with a single product. It provides:
-- **Metrics**: Same as Prometheus
-- **Distributed Traces**: See the full call chain (K8s event → Dedup → Vertex AI call → CRD creation) as a single trace
-- **Logs**: Correlated directly with the above metrics and traces
-
-> [!TIP]
-> SigNoz is the better long-term choice if you want to correlate LLM call traces with incident logs in a single pane. However, Prometheus + Grafana is the more universally recognized and interview-friendly choice.
-
-#### Option C: Custom Incident Approval UI (Next.js Dashboard)
-
-A purpose-built frontend dashboard for human operators. This is the **right final step** but requires the observability foundation first.
-
-**Planned features for the UI:**
-- 📋 Live feed of all active `PatchRequest` and `IncidentRecord` CRDs
-- ✅ One-click **Approve / Reject** buttons for pending patches
-- 🧠 Display of the full **Gemini Diagnosis** with root cause, suggested fix, and confidence
-- 📊 Embedded Grafana panels (via iframe or Prometheus API) for MTTR and incident trends
-- 🔔 Real-time WebSocket notifications when a new incident is detected
-
-**Tech Stack:** Next.js (App Router) + Kubernetes API Server proxy + Tailwind CSS
-
-**Infrastructure required:**
-- A new `sre-dashboard` Deployment in the `monitoring` namespace
-- A `ServiceAccount` with read-only access to `patchrequests` and `incidentrecords` CRDs
-- An `Ingress` or `NodePort` Service to expose the dashboard
-
----
-
-## 📊 Summary of Architectural & Operational Impact (Updated)
-
-| Feature | Infrastructure Added | SLA & Reliability Impact | Interview Wow-Factor |
-|---|---|---|---|
-| **Module 1: Outcome Checker** | Kopf background timer, deployment rollback RBAC | Prevents silent post-patch failures; auto-reverts bad fixes | Demonstrates production safety & closed-loop engineering |
-| **Module 2: RAG Incident Memory** | PostgreSQL 15 StatefulSet, `asyncpg` vector search | Reduces LLM hallucination; speeds up recurring diagnoses | Shows advanced AI engineering beyond simple prompting |
-| **Module 3: Prometheus Observability** | `/metrics` endpoint, Grafana JSON dashboard | Quantifies SRE ROI, MTTR reduction, and LLM cost savings | Proves deep alignment with standard DevOps/SRE tooling |
-| **Module 4: GitOps PR Engine** | GitHub API integration, `gitops-secret` mount | Enforces Infrastructure-as-Code & zero cluster drift | Appeals directly to enterprise managers using ArgoCD/Flux |
-| **Module 5A: SigNoz / Grafana** | SigNoz Helm chart or Grafana + Prometheus stack | Single pane of glass for metrics, traces, and logs | Shows production-grade observability engineering |
-| **Module 5B: Custom UI** | Next.js dashboard, K8s API proxy, Ingress | Human-in-the-loop approval portal for all AI patches | Demonstrates full-stack engineering on top of the AI backend |

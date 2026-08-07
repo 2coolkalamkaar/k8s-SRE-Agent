@@ -55,6 +55,11 @@ spec:
             limits:
               cpu: "500m"
               memory: "256Mi"
+          ports:
+            - name: healthz
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
           livenessProbe:
             httpGet:
               path: /healthz
@@ -69,3 +74,23 @@ spec:
         - name: gcp-credentials
           secret:
             secretName: gcp-credentials
+
+---
+# ── SRE Controller Service (for Prometheus scraping) ─────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: sre-controller
+  namespace: monitoring
+  labels:
+    app: sre-controller
+spec:
+  selector:
+    app: sre-controller
+  ports:
+    - name: healthz
+      port: 8080
+      targetPort: 8080
+    - name: metrics
+      port: 9090
+      targetPort: 9090
