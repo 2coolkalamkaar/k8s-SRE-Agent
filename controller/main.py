@@ -33,7 +33,10 @@ async def _ensure_k8s_configured() -> None:
     """Load in-cluster config once; idempotent."""
     global _K8S_CONFIGURED
     if not _K8S_CONFIGURED:
-        k8s_config.load_incluster_config()   # synchronous in k8s_asyncio ≥ 24
+        try:
+            k8s_config.load_incluster_config()   # synchronous in k8s_asyncio ≥ 24
+        except Exception:
+            await k8s_config.load_kube_config()
         _K8S_CONFIGURED = True
 from kubernetes_asyncio import client as k8s_client, config as k8s_config
 
@@ -51,7 +54,7 @@ from controller.log_preprocessor import (
     make_fingerprint,
     preprocess_logs,
 )
-from controller.llm_client import call_llm
+from controller.llm_client import diagnose_incident
 import controller.telemetry as telemetry
 import controller.outcome_checker  # noqa: F401 (Ensure kopf discovers the timer)
 
@@ -372,6 +375,13 @@ async def _run_diagnosis_pipeline(
             events_text = await _fetch_pod_events(pod_name, namespace, v1)
             pod_context = await _build_pod_context(body, container_statuses)
             pod_context["error_state"] = error_state
+            pod_context["deployment"] = deployment_name
+            
+            # Fetch deployment spec for Fixer Agent
+            apps_api = k8s_client.AppsV1Api()
+            deployment = await apps_api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
+            deployment_dict = custom_api.api_client.sanitize_for_serialization(deployment)
+            deployment_spec = deployment_dict.get("spec", {})
 
             # ── Preprocess logs ───────────────────────────────────────────────
             cleaned_logs = preprocess_logs(raw_logs, error_state)
@@ -423,8 +433,9 @@ async def _run_diagnosis_pipeline(
                     "error_state": error_state,
                 })
 
-            diagnosis = await call_llm(
+            diagnosis = await diagnose_incident(
                 pod_context=pod_context,
+                deployment_spec=deployment_spec,
                 cleaned_logs=cleaned_logs,
                 events=events_text,
                 incident_id=incident_id,
