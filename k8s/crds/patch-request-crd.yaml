@@ -39,10 +39,13 @@ spec:
               properties:
                 approvalState:
                   type: string
-                  enum: [Pending, Approved, Rejected, Applied]
+                  enum: [Pending, Approved, Rejected, Applied, Verifying, Closed, Failed, RolledBack]
                   default: Pending
-                approvedBy:      { type: string }
-                appliedAt:       { type: string }
+                approvedBy:           { type: string }
+                appliedAt:            { type: string }
+                observationStartTime: { type: string }
+                workedOutcome:        { type: boolean }
+                mttrSeconds:          { type: integer }
       subresources:
         status: {}
       additionalPrinterColumns:

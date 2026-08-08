@@ -53,6 +53,7 @@ from controller.log_preprocessor import (
 )
 from controller.llm_client import call_llm
 import controller.telemetry as telemetry
+import controller.outcome_checker  # noqa: F401 (Ensure kopf discovers the timer)
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +256,39 @@ async def on_startup(logger: logging.Logger, **kwargs):
 async def catch_up_scan(logger: logging.Logger, **kwargs):
     """
     Runs once on controller startup.
+    Finds any PatchRequests stuck in 'Applied' state (e.g. after a controller restart)
+    and refreshes their observationStartTime so the outcome_checker timer picks them up.
     """
-    return
+    try:
+        await _ensure_k8s_configured()
+        custom_api = k8s_client.CustomObjectsApi()
+        prs = await custom_api.list_cluster_custom_object(
+            group=CRD_GROUP, version=CRD_VERSION, plural="patchrequests"
+        )
+        now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        requeued = 0
+        for pr in prs.get("items", []):
+            state = pr.get("status", {}).get("approvalState")
+            if state == "Applied":
+                pr_name = pr["metadata"]["name"]
+                pr_ns = pr["metadata"]["namespace"]
+                logger.info("[catch-up] Re-queuing Applied PR %s/%s for outcome checking", pr_ns, pr_name)
+                try:
+                    await custom_api.patch_namespaced_custom_object_status(
+                        group=CRD_GROUP, version=CRD_VERSION, namespace=pr_ns,
+                        plural="patchrequests", name=pr_name,
+                        body={"status": {"observationStartTime": now_iso}},
+                        _content_type="application/merge-patch+json",
+                    )
+                    requeued += 1
+                except Exception as e:
+                    logger.warning("[catch-up] Failed to re-queue %s: %s", pr_name, e)
+        if requeued:
+            logger.info("[catch-up] Re-queued %d Applied PatchRequest(s) for outcome checking", requeued)
+        await custom_api.api_client.close()
+    except Exception as exc:
+        logger.warning("[catch-up] Scan failed (non-fatal): %s", exc)
+
 
 
 
@@ -482,8 +514,8 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
         name, approved_by, target_namespace, deployment_name,
     )
 
-    if not proposed_patch or not deployment_name:
-        logger.warning("[%s] No proposedPatch or deployment name — skipping", name)
+    if not deployment_name:
+        logger.warning("[%s] No deployment name — skipping", name)
         return
 
     await _ensure_k8s_configured()
@@ -502,46 +534,55 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
                 group=CRD_GROUP, version=CRD_VERSION, namespace=namespace,
                 plural="patchrequests", name=name,
                 body={"status": {"approvalState": "Rejected"}},
+                _content_type="application/merge-patch+json",
             )
             return
 
-        # ── Apply the patch to the Deployment ─────────────────────────────
+        # ── Apply the patch to the Deployment (strategic merge patch) ─────
         spec_patch = proposed_patch.get("spec_patch", {})
+        restart_annotation = {
+            "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        }
         if spec_patch:
-            await apps_api.patch_namespaced_deployment(
-                name=deployment_name,
-                namespace=target_namespace,
-                body={"spec": {"template": {"spec": {"containers": [spec_patch]}}}},
-            )
-        else:
-            # Generic rollout restart as fallback for safe restarts
-            await apps_api.patch_namespaced_deployment(
-                name=deployment_name,
-                namespace=target_namespace,
-                body={
-                    "spec": {
-                        "template": {
-                            "metadata": {
-                                "annotations": {
-                                    "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-                                }
-                            }
-                        }
+            patch_body = {
+                "spec": {
+                    "template": {
+                        "metadata": {"annotations": restart_annotation},
+                        "spec": {"containers": [spec_patch]},
                     }
-                },
-            )
+                }
+            }
+        else:
+            # No specific resource fix — force a rollout restart via annotation bump
+            patch_body = {
+                "spec": {
+                    "template": {
+                        "metadata": {"annotations": restart_annotation}
+                    }
+                }
+            }
 
-        # ── Update PatchRequest status → Applied ──────────────────────────
+        await apps_api.patch_namespaced_deployment(
+            name=deployment_name,
+            namespace=target_namespace,
+            body=patch_body,
+        )
+        logger.info("[%s] Deployment %s/%s patched successfully", name, target_namespace, deployment_name)
+
+        # ── Update PatchRequest status → Applied + start observation ──────
+        now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         await custom_api.patch_namespaced_custom_object_status(
             group=CRD_GROUP, version=CRD_VERSION, namespace=namespace,
             plural="patchrequests", name=name,
             body={"status": {
                 "approvalState": "Applied",
-                "appliedAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                "appliedAt": now_iso,
+                "observationStartTime": now_iso,
             }},
+            _content_type="application/merge-patch+json",
         )
         logger.info(
-            "✅ [%s] Patch applied to %s/%s by %s",
+            "✅ [%s] Applied to %s/%s by %s — outcome checker observation window started",
             name, target_namespace, deployment_name, approved_by,
         )
 

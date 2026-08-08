@@ -36,6 +36,8 @@ dedup_hits_counter = None      # sre_agent_dedup_hits_total
 llm_duration_histogram = None  # sre_agent_llm_duration_seconds
 llm_errors_counter = None      # sre_agent_llm_errors_total
 patchrequests_counter = None   # sre_agent_patchrequests_total
+outcome_counter = None         # sre_agent_patch_outcomes_total
+mttr_histogram = None          # sre_agent_mttr_seconds
 
 
 def setup_telemetry() -> None:
@@ -46,6 +48,7 @@ def setup_telemetry() -> None:
     global _tracer, _meter
     global incidents_counter, dedup_hits_counter
     global llm_duration_histogram, llm_errors_counter, patchrequests_counter
+    global outcome_counter, mttr_histogram
 
     if _tracer is not None:
         return  # already initialised
@@ -110,6 +113,16 @@ def setup_telemetry() -> None:
             name="sre_agent_patchrequests_total",
             description="Total PatchRequest CRDs created by the SRE agent",
             unit="1",
+        )
+        outcome_counter = _meter.create_counter(
+            name="sre_agent_patch_outcomes_total",
+            description="Patch outcome: success or rollback",
+            unit="1",
+        )
+        mttr_histogram = _meter.create_histogram(
+            name="sre_agent_mttr_seconds",
+            description="Mean Time to Resolution per incident in seconds",
+            unit="s",
         )
 
         logger.info("✅ OTEL Meter configured — metrics available on /metrics port 8080")

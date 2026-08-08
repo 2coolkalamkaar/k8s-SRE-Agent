@@ -21,8 +21,8 @@ rules:
     verbs: [get, list, watch, patch, update]   # patch needed by Kopf to write status annotations
   # Read and patch deployments to trace pod → deployment ownership and apply approved patches
   - apiGroups: [apps]
-    resources: [deployments, replicasets, statefulsets]
-    verbs: [get, list, watch, patch, update]
+    resources: [deployments, replicasets, statefulsets, deployments/rollback]
+    verbs: [get, list, watch, patch, update, create]
   # Full CRD access for PatchRequest and IncidentRecord
   - apiGroups: [sre.yourdomain.io]
     resources: [patchrequests, patchrequests/status, incidentrecords]
