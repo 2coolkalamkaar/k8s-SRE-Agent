@@ -19,7 +19,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: sre-observer          # Already defined in rbac.yaml
+  name: sre-observer-role          # Already defined in rbac.yaml
 subjects:
   - kind: ServiceAccount
     name: sre-dashboard-sa
