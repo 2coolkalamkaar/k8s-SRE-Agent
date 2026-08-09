@@ -40,6 +40,8 @@ spec:
                   optional: true
             - name: OLLAMA_URL
               value: "http://ollama-service.ai-infra.svc.cluster.local:11434"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/etc/gcp/credentials.json"
             - name: OLLAMA_MODEL
               value: "deepseek-coder:6.7b-instruct"
             - name: OLLAMA_TIMEOUT

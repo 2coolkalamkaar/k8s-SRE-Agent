@@ -124,6 +124,9 @@ class FixerAgent:
 Based on the Root Cause Analysis, propose a valid Kubernetes JSON Merge Patch to fix the deployment.
 Respond in valid JSON format: {{"suggested_fix_description": "step-by-step human description", "auto_restart_safe": true, "patch": {{"spec": {{"template": ...}}}}}}
 If no automated patch can be applied, set "patch" to {{}}. Note: Use strategic merge patch format for Deployments.
+CRITICAL RULES FOR JSON PATCHES:
+If modifying a container in a Deployment, you MUST include the container 'name' field so Kubernetes knows which container to patch. For example:
+{{"spec": {{"template": {{"spec": {{"containers": [{{"name": "YOUR_CONTAINER_NAME", "env": [...]}}]}}}}}}}}
 
 === ROOT CAUSE ANALYSIS ===
 {json.dumps(rca, indent=2)}
@@ -147,7 +150,7 @@ class ValidatorAgent:
                 namespace=namespace,
                 body=patch,
                 dry_run="All",
-                _content_type="application/merge-patch+json"
+                _content_type="application/strategic-merge-patch+json"
             )
             return True, ""
         except Exception as e:

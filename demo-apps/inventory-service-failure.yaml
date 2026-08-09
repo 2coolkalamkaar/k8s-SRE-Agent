@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: production
+  labels:
+    app: inventory-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+    spec:
+      containers:
+        - name: inventory-service
+          image: python:3.9-slim
+          command:
+            - "python"
+            - "-c"
+            - |
+              import os, time
+              db_url = os.environ.get("DATABASE_URL")
+              if not db_url:
+                  print("FATAL ERROR: DATABASE_URL environment variable is missing. Cannot start inventory-service.")
+                  exit(1)
+              print(f"Connected to database at {db_url}")
+              while True:
+                  time.sleep(60)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

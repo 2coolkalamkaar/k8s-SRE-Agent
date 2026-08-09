@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: production
+  labels:
+    app: payment-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+        - name: payment-service
+          image: python:3.9-slim
+          command:
+            - "python"
+            - "-c"
+            - |
+              import time
+              print("Payment service starting...")
+              while True:
+                  time.sleep(60)
+          envFrom:
+            - configMapRef:
+                name: missing-payment-config
