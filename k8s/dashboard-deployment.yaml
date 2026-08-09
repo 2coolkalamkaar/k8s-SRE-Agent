@@ -46,6 +46,13 @@ spec:
         app: sre-dashboard
     spec:
       serviceAccountName: sre-dashboard-sa
+      hostAliases:
+        - ip: "10.96.0.1"
+          hostnames:
+            - "kubernetes"
+            - "kubernetes.default"
+            - "kubernetes.default.svc"
+            - "kubernetes.default.svc.cluster.local"
       containers:
         - name: dashboard
           image: sre-dashboard:latest

@@ -93,15 +93,22 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
             status:
               type: object
+              x-kubernetes-preserve-unknown-fields: true
               properties:
                 approvalState:
                   type: string
-                  enum: [Pending, Approved, Applied, Rejected]
+                  enum: [Pending, Approved, Applied, Rejected, Closed, Failed]
                 approvedBy:
                   type: string
                 approvedAt:
                   type: string
                 appliedAt:
                   type: string
+                observationStartTime:
+                  type: string
+                mttrSeconds:
+                  type: integer
+                workedOutcome:
+                  type: boolean
                 rejectionReason:
                   type: string

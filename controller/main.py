@@ -597,28 +597,46 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
             return
 
         # ── Apply the patch to the Deployment (strategic merge patch) ─────
-        spec_patch = proposed_patch.get("spec_patch", {})
+        # proposedPatch is a full deployment-spec fragment from the LLM, e.g.:
+        #   {"spec": {"template": {"spec": {"containers": [{"name": "coredns", "args": [...]}]}}}}
+        # We deep-merge a restart annotation into it so Kubernetes rolls the pods.
         restart_annotation = {
             "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         }
-        if spec_patch:
-            patch_body = {
-                "spec": {
-                    "template": {
-                        "metadata": {"annotations": restart_annotation},
-                        "spec": {"containers": [spec_patch]},
-                    }
+
+        # Build the base patch: always stamp the restart annotation
+        patch_body: dict = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": restart_annotation}
                 }
             }
+        }
+
+        if proposed_patch:
+            # Merge the LLM's full spec fragment on top of the base annotation patch.
+            # proposed_patch may be shaped like {"spec": {"template": {"spec": {...}}}}
+            # OR like {"spec_patch": {...}} (legacy single-container shortcut).
+            lp_spec = proposed_patch.get("spec", {})
+            lp_tpl = lp_spec.get("template", {})
+            lp_pod_spec = lp_tpl.get("spec", {})
+
+            if lp_pod_spec:
+                # Full nested structure — merge containers list in
+                patch_body["spec"]["template"].update(
+                    {k: v for k, v in lp_tpl.items() if k != "metadata"}
+                )
+                logger.info("[%s] Applying full LLM proposedPatch to %s/%s", name, target_namespace, deployment_name)
+            elif proposed_patch.get("spec_patch"):
+                # Legacy flat container spec (single-container shortcut)
+                patch_body["spec"]["template"]["spec"] = {
+                    "containers": [proposed_patch["spec_patch"]]
+                }
+                logger.info("[%s] Applying legacy spec_patch to %s/%s", name, target_namespace, deployment_name)
+            else:
+                logger.info("[%s] No actionable patch fields — forcing rollout restart on %s/%s", name, target_namespace, deployment_name)
         else:
-            # No specific resource fix — force a rollout restart via annotation bump
-            patch_body = {
-                "spec": {
-                    "template": {
-                        "metadata": {"annotations": restart_annotation}
-                    }
-                }
-            }
+            logger.info("[%s] No proposedPatch — forcing rollout restart on %s/%s", name, target_namespace, deployment_name)
 
         await apps_api.patch_namespaced_deployment(
             name=deployment_name,
@@ -626,6 +644,7 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
             body=patch_body,
         )
         logger.info("[%s] Deployment %s/%s patched successfully", name, target_namespace, deployment_name)
+
 
         # ── Update PatchRequest status → Applied + start observation ──────
         now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()

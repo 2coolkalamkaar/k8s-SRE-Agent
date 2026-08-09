@@ -104,8 +104,6 @@ async def list_incidents():
     except Exception as exc:
         logger.error("Error listing PatchRequests: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        await custom_api.api_client.close()
 
 
 @app.get("/api/incidents/{name}")
@@ -147,8 +145,6 @@ async def get_incident(name: str, namespace: str = "production"):
         }
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"PatchRequest {name} not found: {exc}")
-    finally:
-        await custom_api.api_client.close()
 
 
 @app.get("/api/stats")
@@ -181,8 +177,6 @@ async def get_stats():
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        await custom_api.api_client.close()
 
 
 # ── Static Files ──────────────────────────────────────────────────────────────
