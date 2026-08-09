@@ -62,7 +62,41 @@ WATCH_NAMESPACES = os.getenv("WATCH_NAMESPACES", "production").split(",")
 CRD_GROUP = "sre.yourdomain.io"
 CRD_VERSION = "v1alpha1"
 
+# ── Authentication Override ───────────────────────────────────────────────────
 
+@kopf.on.login()
+async def login_fn(**kwargs):
+    """
+    Override Kopf's default minimalistic login handler.
+    Kopf's default handler hardcodes 'https://kubernetes.default.svc'.
+    This custom handler uses the robust KUBERNETES_SERVICE_HOST env vars provided
+    by the Kubelet, completely bypassing DNS resolution issues in Alpine/slim images.
+    """
+    token_path = '/var/run/secrets/kubernetes.io/serviceaccount/token'
+    ns_path = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+    ca_path = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+
+    if not os.path.exists(token_path):
+        return None
+
+    with open(token_path, encoding='utf-8') as f:
+        token = f.read().strip()
+
+    namespace = None
+    if os.path.exists(ns_path):
+        with open(ns_path, encoding='utf-8') as f:
+            namespace = f.read().strip()
+
+    host = os.environ.get("KUBERNETES_SERVICE_HOST")
+    port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+    server = f"https://{host}:{port}" if host else 'https://kubernetes.default.svc'
+
+    return kopf.ConnectionInfo(
+        server=server,
+        ca_path=ca_path if os.path.exists(ca_path) else None,
+        token=token or None,
+        default_namespace=namespace or None,
+    )
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_incident_id() -> str:
@@ -252,7 +286,7 @@ async def on_startup(logger: logging.Logger, **kwargs):
     logger.info("✅ Telemetry initialised — traces → Tempo, metrics → Prometheus :9090")
 
 
-@kopf.on.startup()
+# @kopf.on.startup()
 async def catch_up_scan(logger: logging.Logger, **kwargs):
     """
     Runs once on controller startup.
