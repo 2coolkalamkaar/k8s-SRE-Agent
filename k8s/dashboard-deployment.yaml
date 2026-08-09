@@ -1,0 +1,96 @@
+---
+# ── SRE Dashboard ServiceAccount ───────────────────────────────────────────────
+# Reuses sre-observer-sa (already defined in rbac.yaml) which has read
+# permissions on PatchRequests and IncidentRecords.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-dashboard-sa
+  namespace: monitoring
+  annotations:
+    description: "Dashboard reads PatchRequests from K8s API — inherits observer permissions"
+
+---
+# ── ClusterRoleBinding: grant dashboard read access to PatchRequests ───────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sre-dashboard-observer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sre-observer          # Already defined in rbac.yaml
+subjects:
+  - kind: ServiceAccount
+    name: sre-dashboard-sa
+    namespace: monitoring
+
+---
+# ── Dashboard Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-dashboard
+  namespace: monitoring
+  labels:
+    app: sre-dashboard
+    component: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sre-dashboard
+  template:
+    metadata:
+      labels:
+        app: sre-dashboard
+    spec:
+      serviceAccountName: sre-dashboard-sa
+      containers:
+        - name: dashboard
+          image: sre-dashboard:latest
+          imagePullPolicy: Never      # Using Kind's local image cache
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: WATCH_NAMESPACES
+              value: "production"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8081
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+---
+# ── Dashboard Service (NodePort for direct browser access) ─────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: sre-dashboard
+  namespace: monitoring
+  labels:
+    app: sre-dashboard
+spec:
+  type: NodePort
+  selector:
+    app: sre-dashboard
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+      nodePort: 30081

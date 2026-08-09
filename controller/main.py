@@ -467,6 +467,19 @@ async def _run_diagnosis_pipeline(
                     "error_state": error_state,
                 })
 
+            # Record MTTD: time from pod start to pipeline trigger
+            try:
+                pod_obj = await v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+                pod_start = pod_obj.status.start_time
+                if pod_start and telemetry.mttd_histogram:
+                    mttd_seconds = (datetime.now(timezone.utc) - pod_start).total_seconds()
+                    telemetry.mttd_histogram.record(max(0, mttd_seconds), {
+                        "namespace": namespace,
+                        "error_state": error_state,
+                    })
+            except Exception as mttd_exc:
+                logger.debug("[%s] Could not record MTTD: %s", incident_id, mttd_exc)
+
             diagnosis = await diagnose_incident(
                 pod_context=pod_context,
                 deployment_spec=deployment_spec,
