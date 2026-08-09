@@ -169,8 +169,12 @@ async def diagnose_incident(
     logger.info("[%s] Starting Multi-Agent Remediation Pipeline", incident_id)
     
     # 1. Analyst Agent
-    rca = await AnalystAgent.analyze(pod_context, cleaned_logs, events, past_incidents or [], incident_id)
-    logger.info("[%s] Analyst RCA: %s", incident_id, rca.get("root_cause", "N/A"))
+    try:
+        rca = await AnalystAgent.analyze(pod_context, cleaned_logs, events, past_incidents or [], incident_id)
+        logger.info("[%s] Analyst RCA: %s", incident_id, rca.get("root_cause", "N/A"))
+    except Exception as exc:
+        logger.error("[%s] Analyst Agent failed with exception: %s", incident_id, exc)
+        rca = {}
 
     # 2. Fixer & Validator Loop
     patch_result = {}
@@ -179,7 +183,11 @@ async def diagnose_incident(
     
     for attempt in range(max_retries):
         logger.info("[%s] Fixer Agent attempt %d/%d", incident_id, attempt + 1, max_retries)
-        patch_result = await FixerAgent.propose_fix(rca, deployment_spec, validation_error, incident_id)
+        try:
+            patch_result = await FixerAgent.propose_fix(rca, deployment_spec, validation_error, incident_id)
+        except Exception as exc:
+            logger.error("[%s] Fixer Agent failed with exception: %s", incident_id, exc)
+            break
         
         patch = patch_result.get("patch", {})
         if not patch:
