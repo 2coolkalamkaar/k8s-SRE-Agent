@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SRE Agent — Live Incident Dashboard</title>
+  <meta name="description" content="Real-time Kubernetes incident dashboard powered by the AI SRE Agent multi-agent remediation pipeline." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-card: rgba(255,255,255,0.04);
+      --bg-card-hover: rgba(255,255,255,0.07);
+      --bg-drawer: #0f1626;
+      --border: rgba(255,255,255,0.08);
+      --border-active: rgba(99,179,237,0.4);
+      --text-primary: #e2e8f0;
+      --text-secondary: #718096;
+      --text-muted: #4a5568;
+      --accent-blue: #63b3ed;
+      --accent-purple: #b794f4;
+      --accent-green: #68d391;
+      --accent-yellow: #f6e05e;
+      --accent-red: #fc8181;
+      --accent-orange: #f6ad55;
+      --severity-critical: #fc8181;
+      --severity-high: #f6ad55;
+      --severity-medium: #f6e05e;
+      --severity-low: #68d391;
+      --state-pending: #f6e05e;
+      --state-approved: #63b3ed;
+      --state-applied: #b794f4;
+      --state-closed: #68d391;
+      --state-rejected: #fc8181;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Animated background grid */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(99,179,237,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(99,179,237,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(10,14,26,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+    }
+
+    .header-inner {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 64px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, #63b3ed, #b794f4);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      box-shadow: 0 0 20px rgba(99,179,237,0.3);
+    }
+
+    .logo-text {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .logo-sub {
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      font-weight: 400;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+    }
+
+    .live-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+      color: var(--accent-green);
+      font-weight: 500;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+
+    .last-refresh {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+
+    /* ── Main Layout ─────────────────────────────────────────────────────── */
+    main {
+      position: relative;
+      z-index: 1;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    /* ── Stats Bar ───────────────────────────────────────────────────────── */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem 1.5rem;
+      transition: background 0.2s, border-color 0.2s, transform 0.2s;
+    }
+
+    .stat-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-active);
+      transform: translateY(-1px);
+    }
+
+    .stat-label {
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat-sub {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-top: 0.3rem;
+    }
+
+    .stat-value.active { color: var(--accent-yellow); }
+    .stat-value.closed { color: var(--accent-green); }
+    .stat-value.mttr   { color: var(--accent-purple); }
+    .stat-value.rate   { color: var(--accent-blue); }
+
+    /* ── Section Header ──────────────────────────────────────────────────── */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .section-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    /* ── Incidents Table ─────────────────────────────────────────────────── */
+    .incidents-table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0 0.4rem;
+    }
+
+    .incidents-table thead th {
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 0 1rem 0.5rem;
+      text-align: left;
+    }
+
+    .incident-row {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, transform 0.15s;
+    }
+
+    .incident-row:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-active);
+      transform: translateY(-1px);
+    }
+
+    .incident-row.active-row {
+      border-color: var(--accent-blue);
+      background: rgba(99,179,237,0.06);
+    }
+
+    .incident-row td {
+      padding: 1rem;
+      font-size: 0.875rem;
+    }
+
+    .incident-row td:first-child { border-radius: 10px 0 0 10px; }
+    .incident-row td:last-child { border-radius: 0 10px 10px 0; }
+
+    .deployment-name {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .namespace-badge {
+      display: inline-block;
+      font-size: 0.68rem;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.06);
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      margin-top: 0.2rem;
+    }
+
+    .root-cause-preview {
+      color: var(--text-secondary);
+      font-size: 0.82rem;
+      max-width: 400px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .seen-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+
+    .age {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .badge-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .sev-critical { color: var(--severity-critical); background: rgba(252,129,129,0.12); }
+    .sev-high     { color: var(--severity-high);     background: rgba(246,173,85,0.12); }
+    .sev-medium   { color: var(--severity-medium);   background: rgba(246,224,94,0.12); }
+    .sev-low      { color: var(--severity-low);      background: rgba(104,211,145,0.12); }
+
+    .state-Pending   { color: var(--state-pending);  background: rgba(246,224,94,0.12); }
+    .state-Approved  { color: var(--state-approved); background: rgba(99,179,237,0.12); }
+    .state-Applied   { color: var(--state-applied);  background: rgba(183,148,244,0.12); }
+    .state-Closed    { color: var(--state-closed);   background: rgba(104,211,145,0.12); }
+    .state-Rejected  { color: var(--state-rejected); background: rgba(252,129,129,0.12); }
+
+    .error-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      color: var(--accent-orange);
+      background: rgba(246,173,85,0.1);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+    }
+
+    /* ── Detail Drawer ───────────────────────────────────────────────────── */
+    .drawer-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+
+    .drawer-overlay.open {
+      opacity: 1;
+      pointer-events: all;
+    }
+
+    .drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: min(600px, 95vw);
+      height: 100vh;
+      background: var(--bg-drawer);
+      border-left: 1px solid var(--border);
+      z-index: 201;
+      overflow-y: auto;
+      transform: translateX(100%);
+      transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      padding: 2rem;
+    }
+
+    .drawer.open {
+      transform: translateX(0);
+    }
+
+    .drawer-close {
+      position: absolute;
+      top: 1.5rem;
+      right: 1.5rem;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .drawer-close:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+
+    .drawer-incident-id {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--accent-blue);
+      margin-bottom: 0.5rem;
+    }
+
+    .drawer-title {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+
+    .drawer-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+      align-items: center;
+    }
+
+    .drawer-section {
+      margin-bottom: 1.5rem;
+    }
+
+    .drawer-section-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin-bottom: 0.6rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .drawer-section-title::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .drawer-text {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.7;
+    }
+
+    .drawer-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 100px;
+      font-size: 0.72rem;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+
+    .pill.positive { color: var(--accent-green); border-color: rgba(104,211,145,0.3); }
+    .pill.warning  { color: var(--accent-yellow); border-color: rgba(246,224,94,0.3); }
+
+    .code-block {
+      background: rgba(0,0,0,0.4);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--accent-green);
+      overflow-x: auto;
+      white-space: pre;
+      line-height: 1.6;
+    }
+
+    /* ── Empty / Loading States ──────────────────────────────────────────── */
+    .state-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 5rem 2rem;
+      gap: 1rem;
+      color: var(--text-muted);
+    }
+
+    .state-icon { font-size: 3rem; }
+
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent-blue);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error-banner {
+      background: rgba(252,129,129,0.08);
+      border: 1px solid rgba(252,129,129,0.3);
+      border-radius: 10px;
+      padding: 1rem 1.5rem;
+      color: var(--accent-red);
+      font-size: 0.875rem;
+      margin-bottom: 1rem;
+    }
+
+    /* ── Responsive ──────────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .stats-bar { grid-template-columns: repeat(3, 1fr); }
+      .col-root-cause, .col-seen { display: none; }
+    }
+
+    @media (max-width: 600px) {
+      .stats-bar { grid-template-columns: repeat(2, 1fr); }
+      main { padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">🤖</div>
+      <div>
+        <div class="logo-text">SRE Agent</div>
+        <div class="logo-sub">Live Incident Dashboard</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="live-badge">
+        <div class="live-dot"></div>
+        Live
+      </div>
+      <div class="last-refresh" id="last-refresh">Refreshing…</div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- Stats Bar -->
+  <div class="stats-bar" id="stats-bar">
+    <div class="stat-card"><div class="stat-label">Total Incidents</div><div class="stat-value" id="stat-total">—</div></div>
+    <div class="stat-card"><div class="stat-label">Active</div><div class="stat-value active" id="stat-active">—</div></div>
+    <div class="stat-card"><div class="stat-label">Closed</div><div class="stat-value closed" id="stat-closed">—</div></div>
+    <div class="stat-card"><div class="stat-label">Avg MTTR</div><div class="stat-value mttr" id="stat-mttr">—</div><div class="stat-sub">Mean Time to Resolution</div></div>
+    <div class="stat-card"><div class="stat-label">Auto-Resolve</div><div class="stat-value rate" id="stat-rate">—</div><div class="stat-sub">Patch success rate</div></div>
+  </div>
+
+  <!-- Error banner -->
+  <div class="error-banner" id="error-banner" style="display:none;"></div>
+
+  <!-- Incidents Table -->
+  <div class="section-header">
+    <div class="section-title">Active & Recent Incidents</div>
+  </div>
+
+  <div id="table-container">
+    <div class="state-container"><div class="spinner"></div><div>Loading incidents…</div></div>
+  </div>
+</main>
+
+<!-- Detail Drawer -->
+<div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="detail-drawer" role="dialog" aria-modal="true">
+  <button class="drawer-close" id="drawer-close-btn" onclick="closeDrawer()" aria-label="Close">✕</button>
+  <div id="drawer-content"><!-- populated by JS --></div>
+</div>
+
+<script>
+  const REFRESH_INTERVAL = 10000;
+  let activeRow = null;
+  let incidents = [];
+
+  // ── Formatters ──────────────────────────────────────────────────────────────
+  function sevClass(sev)   { return `sev-${(sev||'low').toLowerCase()}`; }
+  function stateClass(s)   { return `state-${s||'Pending'}`; }
+  function stateIcon(s) {
+    return { Pending:'⏳', Approved:'✅', Applied:'🔄', Closed:'✓', Rejected:'✗' }[s] || '·';
+  }
+  function fmtMttr(sec) {
+    if (!sec) return '—';
+    if (sec < 60)   return `${sec}s`;
+    if (sec < 3600) return `${Math.round(sec/60)}m`;
+    return `${Math.round(sec/3600)}h`;
+  }
+
+  function escHtml(str) {
+    return (str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Fetch & Render ──────────────────────────────────────────────────────────
+  async function fetchStats() {
+    try {
+      const res = await fetch('/api/stats');
+      if (!res.ok) return;
+      const d = await res.json();
+      document.getElementById('stat-total').textContent  = d.total ?? '—';
+      document.getElementById('stat-active').textContent = d.active ?? '—';
+      document.getElementById('stat-closed').textContent = d.closed ?? '—';
+      document.getElementById('stat-mttr').textContent   = fmtMttr(d.avgMttrSeconds);
+      document.getElementById('stat-rate').textContent   = d.autoResolveRate != null ? `${d.autoResolveRate}%` : '—';
+    } catch (_) {}
+  }
+
+  async function fetchIncidents() {
+    try {
+      const res = await fetch('/api/incidents');
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      const d = await res.json();
+      incidents = d.incidents || [];
+      document.getElementById('error-banner').style.display = 'none';
+      renderTable(incidents);
+    } catch (err) {
+      const banner = document.getElementById('error-banner');
+      banner.textContent = `⚠️ Could not load incidents: ${err.message}`;
+      banner.style.display = 'block';
+    }
+    document.getElementById('last-refresh').textContent =
+      'Last refresh: ' + new Date().toLocaleTimeString();
+  }
+
+  function renderTable(data) {
+    const container = document.getElementById('table-container');
+    if (!data.length) {
+      container.innerHTML = `
+        <div class="state-container">
+          <div class="state-icon">✅</div>
+          <div style="font-size:1.1rem;font-weight:600;color:var(--text-secondary)">All Clear</div>
+          <div style="font-size:0.85rem">No active incidents detected. The cluster is healthy.</div>
+        </div>`;
+      return;
+    }
+
+    const rows = data.map((inc, idx) => `
+      <tr class="incident-row${activeRow === inc.name ? ' active-row' : ''}"
+          id="row-${idx}"
+          onclick="openDrawer('${escHtml(inc.name)}','${escHtml(inc.namespace)}')"
+          tabindex="0"
+          onkeydown="if(event.key==='Enter')openDrawer('${escHtml(inc.name)}','${escHtml(inc.namespace)}')">
+        <td>
+          <div class="deployment-name">${escHtml(inc.deployment)}</div>
+          <div class="namespace-badge">${escHtml(inc.namespace)}</div>
+        </td>
+        <td><span class="error-badge">${escHtml(inc.errorState)}</span></td>
+        <td class="col-root-cause">
+          <div class="root-cause-preview" title="${escHtml(inc.rootCause)}">${escHtml(inc.rootCause) || '<em style="color:var(--text-muted)">Diagnosing…</em>'}</div>
+        </td>
+        <td><span class="badge ${sevClass(inc.severity)}"><span class="badge-dot"></span>${(inc.severity||'—').toUpperCase()}</span></td>
+        <td><span class="badge ${stateClass(inc.approvalState)}">${stateIcon(inc.approvalState)} ${inc.approvalState||'Pending'}</span></td>
+        <td class="col-seen"><span class="seen-count">×${inc.seenCount||1}</span></td>
+        <td><span class="age">${inc.age||'—'}</span></td>
+      </tr>`).join('');
+
+    container.innerHTML = `
+      <table class="incidents-table">
+        <thead>
+          <tr>
+            <th>Deployment</th>
+            <th>Error</th>
+            <th class="col-root-cause">Root Cause (AI Analyst)</th>
+            <th>Severity</th>
+            <th>Status</th>
+            <th class="col-seen">Seen</th>
+            <th>Age</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  // ── Drawer ──────────────────────────────────────────────────────────────────
+  async function openDrawer(name, namespace) {
+    activeRow = name;
+    renderTable(incidents); // re-render to highlight active row
+    try {
+      const res = await fetch(`/api/incidents/${name}?namespace=${namespace}`);
+      if (!res.ok) throw new Error(`Not found`);
+      const inc = await res.json();
+      renderDrawer(inc);
+      document.getElementById('drawer-overlay').classList.add('open');
+      document.getElementById('detail-drawer').classList.add('open');
+    } catch (err) {
+      document.getElementById('drawer-content').innerHTML = `
+        <p style="color:var(--accent-red)">Failed to load details: ${err.message}</p>`;
+      document.getElementById('drawer-overlay').classList.add('open');
+      document.getElementById('detail-drawer').classList.add('open');
+    }
+  }
+
+  function closeDrawer() {
+    activeRow = null;
+    renderTable(incidents);
+    document.getElementById('drawer-overlay').classList.remove('open');
+    document.getElementById('detail-drawer').classList.remove('open');
+  }
+
+  function renderDrawer(inc) {
+    const patchJson = JSON.stringify(inc.proposedPatch, null, 2);
+    const mttrStr = inc.mttrSeconds ? fmtMttr(inc.mttrSeconds) : null;
+
+    document.getElementById('drawer-content').innerHTML = `
+      <div class="drawer-incident-id">${escHtml(inc.incidentId||'')}</div>
+      <div class="drawer-title">${escHtml(inc.deployment)}</div>
+      <div class="drawer-meta">
+        <span class="badge ${sevClass(inc.severity)}"><span class="badge-dot"></span>${(inc.severity||'').toUpperCase()}</span>
+        <span class="badge ${stateClass(inc.approvalState)}">${stateIcon(inc.approvalState)} ${inc.approvalState}</span>
+        <span class="error-badge">${escHtml(inc.errorState)}</span>
+        <span class="namespace-badge">${escHtml(inc.namespace)} / ${escHtml(inc.targetNamespace||inc.namespace)}</span>
+      </div>
+
+      ${inc.humanNote ? `
+      <div class="drawer-section">
+        <div class="drawer-section-title">Impact</div>
+        <div class="drawer-text">${escHtml(inc.humanNote)}</div>
+      </div>` : ''}
+
+      <div class="drawer-section">
+        <div class="drawer-section-title">Root Cause — AI Analyst</div>
+        <div class="drawer-text">${escHtml(inc.rootCause) || '<em>Analysis in progress…</em>'}</div>
+      </div>
+
+      ${inc.suggestedFix ? `
+      <div class="drawer-section">
+        <div class="drawer-section-title">Proposed Fix — AI Fixer</div>
+        <div class="drawer-text">${escHtml(inc.suggestedFix)}</div>
+      </div>` : ''}
+
+      ${patchJson && patchJson !== 'null' && patchJson !== '{}' ? `
+      <div class="drawer-section">
+        <div class="drawer-section-title">Validated Patch (pre-approved by Validator Agent)</div>
+        <div class="code-block">${escHtml(patchJson)}</div>
+      </div>` : ''}
+
+      <div class="drawer-section">
+        <div class="drawer-section-title">Details</div>
+        <div class="drawer-pills">
+          <span class="pill ${inc.autoRestartSafe ? 'positive' : 'warning'}">
+            ${inc.autoRestartSafe ? '✓' : '!'} Auto-restart safe: ${inc.autoRestartSafe ? 'yes' : 'no'}
+          </span>
+          <span class="pill ${inc.likelyRecurring ? 'warning' : ''}">
+            ${inc.likelyRecurring ? '⚠ Recurring' : '✓ First occurrence'}
+          </span>
+          <span class="pill">Seen ×${inc.seenCount||1}</span>
+          ${inc.confidence ? `<span class="pill">Confidence: ${inc.confidence}</span>` : ''}
+          ${mttrStr ? `<span class="pill positive">MTTR: ${mttrStr}</span>` : ''}
+          <span class="pill">Created ${inc.age}</span>
+        </div>
+      </div>
+
+      ${inc.approvalState === 'Pending' ? `
+      <div class="drawer-section">
+        <div class="drawer-section-title">Approve via kubectl</div>
+        <div class="code-block">kubectl patch pr ${escHtml(inc.name)} \\
+  -n ${escHtml(inc.namespace)} \\
+  --subresource=status --type=merge \\
+  -p '{"status":{"approvalState":"Approved","approvedBy":"your@email.com"}}'</div>
+      </div>` : ''}
+    `;
+  }
+
+  // ── Init ────────────────────────────────────────────────────────────────────
+  async function refresh() {
+    await Promise.all([fetchStats(), fetchIncidents()]);
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_INTERVAL);
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeDrawer();
+  });
+</script>
+</body>
+</html>

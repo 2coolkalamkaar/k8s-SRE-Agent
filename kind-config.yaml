@@ -22,3 +22,6 @@ nodes:
       - containerPort: 5432   # PostgreSQL DB access (optional debugging)
         hostPort: 5432
         listenAddress: "127.0.0.1"
+      - containerPort: 30081  # SRE Agent Dashboard
+        hostPort: 8081
+        listenAddress: "127.0.0.1"

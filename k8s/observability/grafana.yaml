@@ -318,3 +318,147 @@ spec:
       port: 3000
       targetPort: 3000
       nodePort: 30300
+
+---
+# ── SRE Agent SLO Dashboard ───────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-slo-dashboard
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+data:
+  sre-agent-slos.json: |
+    {
+      "title": "SRE Agent — SLO Overview",
+      "uid": "sre-agent-slos",
+      "tags": ["sre", "slo", "platform"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "title": "MTTR — p95 / p50 (Mean Time to Resolution)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+          "fieldConfig": {
+            "defaults": { "unit": "s", "color": { "mode": "palette-classic" } }
+          },
+          "targets": [
+            {
+              "expr": "sre_agent_mttr_p95_1h",
+              "legendFormat": "MTTR p95",
+              "datasource": { "uid": "prometheus" }
+            },
+            {
+              "expr": "sre_agent_mttr_p50_1h",
+              "legendFormat": "MTTR p50 (median)",
+              "datasource": { "uid": "prometheus" }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "MTTD — Avg Detection Time",
+          "type": "stat",
+          "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 120 },
+                  { "color": "red", "value": 300 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sre_agent_mttd_avg_5m",
+              "legendFormat": "MTTD avg",
+              "datasource": { "uid": "prometheus" }
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Auto-Resolve Rate (last 1h)",
+          "type": "gauge",
+          "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0, "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 0.5 },
+                  { "color": "green", "value": 0.8 }
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sre_agent_auto_resolve_rate_1h",
+              "legendFormat": "Auto-resolve rate",
+              "datasource": { "uid": "prometheus" }
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Incidents Detected — by Severity",
+          "type": "barchart",
+          "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+          "fieldConfig": {
+            "defaults": { "unit": "short" }
+          },
+          "targets": [
+            {
+              "expr": "increase(sre_agent_incidents_total[1h])",
+              "legendFormat": "{{severity}} / {{error_state}}",
+              "datasource": { "uid": "prometheus" }
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "LLM Call Latency (p95)",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+          "fieldConfig": {
+            "defaults": { "unit": "s" }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, rate(sre_agent_llm_duration_seconds_bucket[5m]))",
+              "legendFormat": "LLM latency p95",
+              "datasource": { "uid": "prometheus" }
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Dedup Hits by Layer (noise suppressed)",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+          "fieldConfig": {
+            "defaults": { "unit": "short" }
+          },
+          "targets": [
+            {
+              "expr": "rate(sre_agent_dedup_hits_total[5m])",
+              "legendFormat": "{{layer}}",
+              "datasource": { "uid": "prometheus" }
+            }
+          ]
+        }
+      ]
+    }

@@ -1,0 +1,37 @@
+---
+# ── SRE Agent SLO Recording Rules ─────────────────────────────────────────────
+# These pre-compute expensive range queries into instant metrics for Grafana.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-slo-rules
+  namespace: observability
+data:
+  sre-agent-slos.yaml: |
+    groups:
+      - name: sre_agent_slos
+        interval: 30s
+        rules:
+          # Auto-resolve rate: fraction of patches that resulted in success (vs rollback)
+          - record: sre_agent_auto_resolve_rate_1h
+            expr: |
+              rate(sre_agent_patch_outcomes_total{outcome="success"}[1h])
+              /
+              rate(sre_agent_patch_outcomes_total[1h])
+
+          # MTTD average over 5 minutes (rolling)
+          - record: sre_agent_mttd_avg_5m
+            expr: |
+              rate(sre_agent_mttd_seconds_sum[5m])
+              /
+              rate(sre_agent_mttd_seconds_count[5m])
+
+          # MTTR p95 (95th percentile) over 1 hour
+          - record: sre_agent_mttr_p95_1h
+            expr: |
+              histogram_quantile(0.95, rate(sre_agent_mttr_seconds_bucket[1h]))
+
+          # MTTR p50 (median) over 1 hour
+          - record: sre_agent_mttr_p50_1h
+            expr: |
+              histogram_quantile(0.50, rate(sre_agent_mttr_seconds_bucket[1h]))

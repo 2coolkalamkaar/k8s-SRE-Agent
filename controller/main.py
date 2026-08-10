@@ -33,7 +33,10 @@ async def _ensure_k8s_configured() -> None:
     """Load in-cluster config once; idempotent."""
     global _K8S_CONFIGURED
     if not _K8S_CONFIGURED:
-        k8s_config.load_incluster_config()   # synchronous in k8s_asyncio ≥ 24
+        try:
+            k8s_config.load_incluster_config()   # synchronous in k8s_asyncio ≥ 24
+        except Exception:
+            await k8s_config.load_kube_config()
         _K8S_CONFIGURED = True
 from kubernetes_asyncio import client as k8s_client, config as k8s_config
 
@@ -51,7 +54,7 @@ from controller.log_preprocessor import (
     make_fingerprint,
     preprocess_logs,
 )
-from controller.llm_client import call_llm
+from controller.llm_client import diagnose_incident
 import controller.telemetry as telemetry
 import controller.outcome_checker  # noqa: F401 (Ensure kopf discovers the timer)
 
@@ -406,6 +409,13 @@ async def _run_diagnosis_pipeline(
             events_text = await _fetch_pod_events(pod_name, namespace, v1)
             pod_context = await _build_pod_context(body, container_statuses)
             pod_context["error_state"] = error_state
+            pod_context["deployment"] = deployment_name
+            
+            # Fetch deployment spec for Fixer Agent
+            apps_api = k8s_client.AppsV1Api()
+            deployment = await apps_api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
+            deployment_dict = custom_api.api_client.sanitize_for_serialization(deployment)
+            deployment_spec = deployment_dict.get("spec", {})
 
             # ── Preprocess logs ───────────────────────────────────────────────
             cleaned_logs = preprocess_logs(raw_logs, error_state)
@@ -457,8 +467,22 @@ async def _run_diagnosis_pipeline(
                     "error_state": error_state,
                 })
 
-            diagnosis = await call_llm(
+            # Record MTTD: time from pod start to pipeline trigger
+            try:
+                pod_obj = await v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+                pod_start = pod_obj.status.start_time
+                if pod_start and telemetry.mttd_histogram:
+                    mttd_seconds = (datetime.now(timezone.utc) - pod_start).total_seconds()
+                    telemetry.mttd_histogram.record(max(0, mttd_seconds), {
+                        "namespace": namespace,
+                        "error_state": error_state,
+                    })
+            except Exception as mttd_exc:
+                logger.debug("[%s] Could not record MTTD: %s", incident_id, mttd_exc)
+
+            diagnosis = await diagnose_incident(
                 pod_context=pod_context,
+                deployment_spec=deployment_spec,
                 cleaned_logs=cleaned_logs,
                 events=events_text,
                 incident_id=incident_id,
@@ -573,28 +597,46 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
             return
 
         # ── Apply the patch to the Deployment (strategic merge patch) ─────
-        spec_patch = proposed_patch.get("spec_patch", {})
+        # proposedPatch is a full deployment-spec fragment from the LLM, e.g.:
+        #   {"spec": {"template": {"spec": {"containers": [{"name": "coredns", "args": [...]}]}}}}
+        # We deep-merge a restart annotation into it so Kubernetes rolls the pods.
         restart_annotation = {
             "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         }
-        if spec_patch:
-            patch_body = {
-                "spec": {
-                    "template": {
-                        "metadata": {"annotations": restart_annotation},
-                        "spec": {"containers": [spec_patch]},
-                    }
+
+        # Build the base patch: always stamp the restart annotation
+        patch_body: dict = {
+            "spec": {
+                "template": {
+                    "metadata": {"annotations": restart_annotation}
                 }
             }
+        }
+
+        if proposed_patch:
+            # Merge the LLM's full spec fragment on top of the base annotation patch.
+            # proposed_patch may be shaped like {"spec": {"template": {"spec": {...}}}}
+            # OR like {"spec_patch": {...}} (legacy single-container shortcut).
+            lp_spec = proposed_patch.get("spec", {})
+            lp_tpl = lp_spec.get("template", {})
+            lp_pod_spec = lp_tpl.get("spec", {})
+
+            if lp_pod_spec:
+                # Full nested structure — merge containers list in
+                patch_body["spec"]["template"].update(
+                    {k: v for k, v in lp_tpl.items() if k != "metadata"}
+                )
+                logger.info("[%s] Applying full LLM proposedPatch to %s/%s", name, target_namespace, deployment_name)
+            elif proposed_patch.get("spec_patch"):
+                # Legacy flat container spec (single-container shortcut)
+                patch_body["spec"]["template"]["spec"] = {
+                    "containers": [proposed_patch["spec_patch"]]
+                }
+                logger.info("[%s] Applying legacy spec_patch to %s/%s", name, target_namespace, deployment_name)
+            else:
+                logger.info("[%s] No actionable patch fields — forcing rollout restart on %s/%s", name, target_namespace, deployment_name)
         else:
-            # No specific resource fix — force a rollout restart via annotation bump
-            patch_body = {
-                "spec": {
-                    "template": {
-                        "metadata": {"annotations": restart_annotation}
-                    }
-                }
-            }
+            logger.info("[%s] No proposedPatch — forcing rollout restart on %s/%s", name, target_namespace, deployment_name)
 
         await apps_api.patch_namespaced_deployment(
             name=deployment_name,
@@ -602,6 +644,7 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
             body=patch_body,
         )
         logger.info("[%s] Deployment %s/%s patched successfully", name, target_namespace, deployment_name)
+
 
         # ── Update PatchRequest status → Applied + start observation ──────
         now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()

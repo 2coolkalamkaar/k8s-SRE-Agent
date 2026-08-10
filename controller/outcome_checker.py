@@ -161,8 +161,26 @@ async def outcome_checker_timer(body, name, namespace, logger, **kwargs):
     fingerprint = llm_diagnosis.get("error_fingerprint")
 
     if not observation_start:
-        logger.warning("[outcome] %s: Applied but no observationStartTime — skipping", name)
-        return
+        # Fallback: use appliedAt if observationStartTime was lost (status subresource merge-patch race)
+        observation_start = body.get("status", {}).get("appliedAt")
+        if observation_start:
+            logger.info("[outcome] %s: observationStartTime missing — using appliedAt as fallback", name)
+            # Re-stamp so future ticks use the dedicated field
+            try:
+                await _ensure_k8s_configured()
+                _fix_api = k8s_client.CustomObjectsApi()
+                await _fix_api.patch_namespaced_custom_object_status(
+                    group=CRD_GROUP, version=CRD_VERSION, namespace=namespace,
+                    plural="patchrequests", name=name,
+                    body={"status": {"observationStartTime": observation_start}},
+                    _content_type="application/merge-patch+json",
+                )
+                await _fix_api.api_client.close()
+            except Exception as fix_exc:
+                logger.warning("[outcome] Could not re-stamp observationStartTime: %s", fix_exc)
+        else:
+            logger.warning("[outcome] %s: Applied but no observationStartTime or appliedAt — skipping", name)
+            return
 
     obs_dt = datetime.fromisoformat(observation_start).replace(tzinfo=None)
     elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - obs_dt).total_seconds()

@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping-service
+  namespace: production
+  labels:
+    app: shipping-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shipping-service
+  template:
+    metadata:
+      labels:
+        app: shipping-service
+    spec:
+      containers:
+        - name: shipping-app
+          image: python:3.9-slim
+          command:
+            - "python"
+            - "-c"
+            - |
+              import sys
+              print("Shipping service encountered a fatal exception during startup: missing required environment variable 'SHIPPING_API_KEY'")
+              sys.exit(1)

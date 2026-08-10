@@ -1,0 +1,64 @@
+Name:         shipping-service-pr-2026-0809-7829
+Namespace:    production
+Labels:       incident-id=INC-2026-0809-7829
+              target-deployment=shipping-service
+Annotations:  <none>
+API Version:  sre.yourdomain.io/v1alpha1
+Kind:         PatchRequest
+Metadata:
+  Creation Timestamp:  2026-08-09T07:11:28Z
+  Finalizers:
+    kopf.zalando.org/KopfFinalizerMarker
+  Generation:        6
+  Resource Version:  135277
+  UID:               ecf69537-0ffb-4c20-9eac-d7eccf2fa51c
+Spec:
+  Auto Restart Safe:  true
+  Confidence:         high
+  Error State:        CrashLoopBackOff
+  Human Note:         The 'shipping-service' is completely unavailable, impacting all downstream systems and business functions that depend on shipping operations. This results in service downtime and potential data processing delays.
+  Incident Id:        INC-2026-0809-7829
+  Likely Recurring:   true
+  Llm Diagnosis:
+    auto_restart_safe:  true
+    confidence_boost:   high
+    config_suggestions:
+    error_state:            CrashLoopBackOff
+    estimated_impact:       The 'shipping-service' is completely unavailable, impacting all downstream systems and business functions that depend on shipping operations. This results in service downtime and potential data processing delays.
+    likely_recurring:       true
+    matches_past_incident:  <nil>
+    proposed_patch:
+      Spec:
+        Template:
+          Spec:
+            Containers:
+              Args:
+                app.py
+              Command:  <nil>
+              Name:     shipping-app
+    root_cause:         The 'shipping-app' container exited immediately after startup, likely due to an invalid entrypoint command, missing application code, or critical runtime dependencies (given the 'python:3.9-slim' image), which prevented any application logs from being generated or retrieved.
+    Severity:           high
+    suggested_fix:      The current `command` field in the 'shipping-app' container is a diagnostic script that explicitly causes the container to exit immediately, mimicking a fatal startup error related to a missing `SHIPPING_API_KEY`. This patch addresses the 'invalid entrypoint command' root cause by removing this erroneous `command` field and instead adding `args` to execute 'app.py' using the Python image's default entrypoint. This allows the container to attempt to run the actual application code, assuming 'app.py' is the correct entrypoint script within the container. If 'app.py' is not present or if critical environment variables (like `SHIPPING_API_KEY`) are still required by the application, the container may still fail, but with more accurate and actionable error messages related to the actual application's startup.
+  Llm Summary:          The current `command` field in the 'shipping-app' container is a diagnostic script that explicitly causes the container to exit immediately, mimicking a fatal startup error related to a missing `SHIPPING_API_KEY`. This patch addresses the 'invalid entrypoint command' root cause by removing this erroneous `command` field and instead adding `args` to execute 'app.py' using the Python image's default entrypoint. This allows the container to attempt to run the actual application code, assuming 'app.
+  Proposed Patch:
+    Spec:
+      Template:
+        Spec:
+          Containers:
+            Args:
+              app.py
+            Command:  <nil>
+            Name:     shipping-app
+  Root Cause:         The 'shipping-app' container exited immediately after startup, likely due to an invalid entrypoint command, missing application code, or critical runtime dependencies (given the 'python:3.9-slim' image), which prevented any application logs from being generated or retrieved.
+  Seen Count:         6
+  Severity:           high
+  Target Deployment:  shipping-service
+  Target Namespace:   production
+Events:
+  Type    Reason   Age   From  Message
+  ----    ------   ----  ----  -------
+  Normal  Logging  2m1s  kopf  Timer 'outcome_checker_timer' succeeded.
+  Normal  Logging  91s   kopf  Timer 'outcome_checker_timer' succeeded.
+  Normal  Logging  61s   kopf  Timer 'outcome_checker_timer' succeeded.
+  Normal  Logging  31s   kopf  Timer 'outcome_checker_timer' succeeded.
+  Normal  Logging  1s    kopf  Timer 'outcome_checker_timer' succeeded.

@@ -13,3 +13,5 @@ opentelemetry-exporter-otlp-proto-grpc>=1.25.0
 opentelemetry-exporter-prometheus>=0.46b0
 opentelemetry-instrumentation-httpx>=0.46b0
 aiodns==3.2.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
