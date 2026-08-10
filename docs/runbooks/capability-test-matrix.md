@@ -376,30 +376,31 @@ YAML
 
 | Test | Scenario | Detected | Diagnosed | Fix Proposed | Pass/Fail |
 |------|----------|----------|-----------|--------------|-----------|
-| T1.1 | CrashLoopBackOff | | | | |
-| T1.2 | OOMKilled | | | | |
-| T1.3 | Init container fail | | | | |
-| T2.1 | Missing ConfigMap | | | | |
-| T2.2 | Missing Secret | | | | |
-| T2.3 | Wrong image tag | | | | |
-| T2.4 | Wrong config path | | | | |
-| T3.1 | Svc unreachable (pod crash) | | | | |
-| T3.2 | Wrong label selector | | | | |
-| T3.3 | Scale to zero | | | | |
-| T4.1 | HTTP 500 errors | | | | |
-| T5.1 | Pod Pending | | | | |
+| T1.1 | CrashLoopBackOff | ✅ | ✅ | ✅ | **✅ PASS** |
+| T1.2 | OOMKilled | ✅ | ✅ | ✅ | **✅ PASS** |
+| T1.3 | Init container fail | ✅ | ✅ | ✅ | **✅ FIXED** |
+| T2.1 | Missing ConfigMap | ✅ | ✅ | ✅ | **✅ FIXED** |
+| T2.2 | Missing Secret | ✅ | ✅ | ✅ | **✅ FIXED** |
+| T2.3 | Wrong image tag | ✅ | ✅ | ✅ | **✅ PASS** |
+| T2.4 | Wrong config path | ✅ | ✅ | ✅ | **✅ PASS** |
+| T3.1 | Svc unreachable (pod crash) | ✅ | ✅ | ✅ | **✅ PASS** |
+| T3.2 | Wrong label selector | ❌ | ❌ | ❌ | ❌ known gap |
+| T3.3 | Scale to zero | ❌ | ❌ | ❌ | ❌ known gap |
+| T4.1 | HTTP 500 errors | ❌ | ❌ | ❌ | ❌ known gap |
+| T5.1 | Pod Pending | ❌ | ❌ | ❌ | ❌ known gap |
 
 ---
 
 ## Gaps & Fixes Roadmap
 
-| Gap | Fix | Effort |
-|-----|-----|--------|
-| Init container failures | Add `kopf.on.field("pods", field="status.initContainerStatuses")` | 1 hour |
-| Scale-to-zero | Add deployment replicas watcher | 2 hours |
-| Wrong selector / 0 endpoints | Prometheus `kube_endpoint_address_available == 0` alert | 1 day |
-| Pod Pending | Pod phase watcher or Prometheus alert | 1 day |
-| HTTP 500 / latency | Prometheus Alertmanager webhook receiver | 2-3 days |
+| Gap | Fix | Effort | Status |
+|-----|-----|--------|--------|
+| Init container failures | Add `kopf.on.field("pods", field="status.initContainerStatuses")` | 1 hour | ✅ DONE |
+| `CreateContainerConfigError` | Add to `IMMEDIATE_TRIGGER_STATES` to bypass dampening | 1 hour | ✅ DONE |
+| Scale-to-zero | Add deployment replicas watcher | 2 hours | Open |
+| Wrong selector / 0 endpoints | Prometheus `kube_endpoint_address_available == 0` alert | 1 day | Open |
+| Pod Pending | Pod phase watcher or Prometheus alert | 1 day | Open |
+| HTTP 500 / latency | Prometheus Alertmanager webhook receiver | 2-3 days | Open |
 
 ---
 
