@@ -51,6 +51,7 @@ from controller.dedup import (
 from controller.incident import Incident
 from controller.log_preprocessor import (
     detect_error_state,
+    detect_init_error_state,
     make_fingerprint,
     preprocess_logs,
 )
@@ -371,6 +372,51 @@ async def on_pod_status_change(body, name, namespace, new, logger, **kwargs):
             error_state=error_state,
             body=body,
             container_statuses=new or [],
+        )
+    )
+
+
+# ── Init Container Watch Handler ──────────────────────────────────────────────
+
+@kopf.on.field("pods", field="status.initContainerStatuses")
+async def on_pod_init_status_change(body, name, namespace, new, logger, **kwargs):
+    """
+    Fires whenever a pod's initContainerStatuses field changes.
+    Handles Init:CrashLoopBackOff scenarios where the main container
+    never starts (DB migration failures, wait-for-service timeouts, etc.).
+    Routes through the same 3-layer dedup + LLM pipeline as the main handler.
+    """
+    if namespace not in WATCH_NAMESPACES:
+        return
+
+    error_state = detect_init_error_state(new or [])
+    if not error_state:
+        return  # Init containers healthy or not yet started
+
+    deployment_name = _get_owner_deployment(body)
+    if not deployment_name:
+        return
+
+    pod_uid = body["metadata"].get("uid", name)
+    logger.info(
+        "[init-handler] %s/%s → error_state=%s deployment=%s",
+        namespace, name, error_state, deployment_name
+    )
+
+    # Layer 1: InitCrashLoopBackOff is in IMMEDIATE_TRIGGER_STATES—fires on first event
+    if not await should_trigger(pod_uid, error_state):
+        logger.info("[dedup-L1] %s/%s: init error not yet persistent, skipping", namespace, name)
+        return
+
+    logger.info("[dedup-L1] ✅ %s/%s: init container failure confirmed — queuing pipeline", namespace, name)
+    await asyncio.create_task(
+        _run_diagnosis_pipeline(
+            pod_name=name,
+            namespace=namespace,
+            deployment_name=deployment_name,
+            error_state=error_state,
+            body=body,
+            container_statuses=new or [],  # pass initContainerStatuses as context
         )
     )
 

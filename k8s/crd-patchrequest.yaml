@@ -64,6 +64,7 @@ spec:
                     - ImagePullBackOff
                     - CreateContainerConfigError
                     - ContainerCrashed
+                    - InitCrashLoopBackOff
                 rootCause:
                   type: string
                   maxLength: 500

@@ -31,7 +31,14 @@ logger = logging.getLogger(__name__)
 # ── Layer 1 constants ──────────────────────────────────────────────────────────
 DAMPEN_COUNT = 3
 DAMPEN_WINDOW_SECS = 300                  # 5 minutes
-IMMEDIATE_TRIGGER_STATES = {"OOMKilled"}  # Always trigger, no dampening
+# States that never cause pod restarts — dampening would block them forever.
+# Fire immediately on first event.
+IMMEDIATE_TRIGGER_STATES = {
+    "OOMKilled",               # Kills immediately, single event
+    "CreateContainerConfigError",  # Pod stuck, never restarts
+    "ImagePullBackOff",        # Pod stuck, never restarts
+    "InitCrashLoopBackOff",    # Init container failure
+}
 
 # ── Layer 2 constants ──────────────────────────────────────────────────────────
 CACHE_TTL_DEFAULT = timedelta(hours=1)

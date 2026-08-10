@@ -143,3 +143,38 @@ def detect_error_state(container_statuses: list[dict]) -> str | None:
             return "CrashLoopBackOff"
 
     return None
+
+
+def detect_init_error_state(init_container_statuses: list[dict]) -> str | None:
+    """
+    Parse Kubernetes initContainerStatuses and return a canonical error state
+    if any init container is failing, else None.
+
+    Init containers don't CrashLoopBackOff the same way main containers do —
+    they cycle through Terminated(Error) → Waiting(PodInitializing) → repeat.
+    We surface this as 'InitCrashLoopBackOff' so the LLM gets a clear signal.
+    """
+    if not init_container_statuses:
+        return None
+
+    for cs in init_container_statuses:
+        state = cs.get("state", {})
+        last_state = cs.get("lastState", {})
+
+        waiting = state.get("waiting", {})
+        # Kubernetes labels the pod Init:CrashLoopBackOff when an init container
+        # keeps failing — the container's own waiting reason will be CrashLoopBackOff
+        if waiting.get("reason") in ("CrashLoopBackOff", "Error"):
+            return "InitCrashLoopBackOff"
+
+        # Init container terminated with non-zero exit — about to be retried
+        terminated = state.get("terminated", {})
+        if terminated.get("exitCode", 0) not in (0, None):
+            return "InitCrashLoopBackOff"
+
+        # Also check lastState for init containers that are being retried
+        last_terminated = last_state.get("terminated", {})
+        if last_terminated.get("exitCode", 0) not in (0, None):
+            return "InitCrashLoopBackOff"
+
+    return None
