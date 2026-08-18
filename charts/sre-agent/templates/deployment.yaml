@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sre-agent.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sre-agent.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "sre-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.controller.serviceAccount.name }}
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          env:
+            - name: LLM_PROVIDER
+              value: {{ .Values.controller.env.llmProvider | quote }}
+            - name: VERTEX_PROJECT
+              value: {{ .Values.controller.env.vertexProject | quote }}
+            - name: VERTEX_LOCATION
+              value: {{ .Values.controller.env.vertexLocation | quote }}
+            - name: VERTEX_MODEL
+              value: {{ .Values.controller.env.vertexModel | quote }}
+            - name: OLLAMA_URL
+              value: {{ .Values.controller.env.ollamaUrl | quote }}
+            - name: OLLAMA_MODEL
+              value: {{ .Values.controller.env.ollamaModel | quote }}
+            - name: OLLAMA_TIMEOUT
+              value: {{ .Values.controller.env.ollamaTimeout | quote }}
+            - name: WATCH_NAMESPACES
+              value: {{ .Values.controller.env.watchNamespaces | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.controller.env.logLevel | quote }}
+            - name: OUTCOME_OBSERVATION_WINDOW
+              value: {{ .Values.controller.env.outcomeObservationWindow | quote }}
+            {{- if .Values.gcpCredentials.enabled }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/etc/gcp/credentials.json"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          ports:
+            - name: healthz
+              containerPort: {{ .Values.controller.healthPort }}
+            - name: metrics
+              containerPort: {{ .Values.controller.metricsPort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: {{ .Values.controller.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.controller.livenessProbe.periodSeconds }}
+          {{- if .Values.gcpCredentials.enabled }}
+          volumeMounts:
+            - name: gcp-credentials
+              mountPath: /etc/gcp
+              readOnly: true
+          {{- end }}
+      {{- if .Values.gcpCredentials.enabled }}
+      volumes:
+        - name: gcp-credentials
+          secret:
+            secretName: {{ .Values.gcpCredentials.secretName }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sre-agent.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "sre-agent.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: healthz
+      port: {{ .Values.controller.healthPort }}
+      targetPort: healthz
+    - name: metrics
+      port: {{ .Values.controller.metricsPort }}
+      targetPort: metrics

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: sre-agent
+description: Kubernetes AI SRE Agent — autonomous incident detection, diagnosis, and remediation
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - kubernetes
+  - sre
+  - ai
+  - incident-response
+  - llm
+  - operator
+maintainers:
+  - name: Rahul
+home: https://github.com/2coolkalamkaar/k8s-SRE-Agent
+sources:
+  - https://github.com/2coolkalamkaar/k8s-SRE-Agent

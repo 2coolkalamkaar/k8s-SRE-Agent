@@ -1,0 +1,66 @@
+# SRE Agent Helm Values
+# Override these in your own values.yaml or via --set flags
+
+# ── Controller Configuration ─────────────────────────────────────────────────
+controller:
+  replicaCount: 1
+  image:
+    repository: sre-controller
+    tag: latest
+    pullPolicy: Never  # For Kind; change to IfNotPresent or Always for prod
+
+  serviceAccount:
+    name: sre-observer-sa
+    create: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Environment variables for the controller
+  env:
+    llmProvider: "auto"
+    vertexProject: ""
+    vertexLocation: "us-central1"
+    vertexModel: "gemini-2.5-flash"
+    ollamaUrl: "http://ollama-service.ai-infra.svc.cluster.local:11434"
+    ollamaModel: "deepseek-coder:6.7b-instruct"
+    ollamaTimeout: "300"
+    watchNamespaces: "production"
+    logLevel: "INFO"
+    outcomeObservationWindow: "600"
+
+  # Probes
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 30
+
+  # Prometheus metrics port
+  metricsPort: 9090
+  healthPort: 8080
+
+# ── GCP Credentials (for Vertex AI) ──────────────────────────────────────────
+gcpCredentials:
+  # Set to true if using Vertex AI
+  enabled: false
+  # Name of the pre-existing Kubernetes secret containing credentials.json
+  secretName: gcp-credentials
+
+# ── CRDs ──────────────────────────────────────────────────────────────────────
+crds:
+  install: true
+
+# ── RBAC ──────────────────────────────────────────────────────────────────────
+rbac:
+  create: true
+
+# ── Namespace ─────────────────────────────────────────────────────────────────
+namespace: monitoring
+
+# ── Network Policy ────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true

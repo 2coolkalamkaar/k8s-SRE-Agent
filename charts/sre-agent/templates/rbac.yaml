@@ -1,0 +1,55 @@
+{{- if .Values.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.controller.serviceAccount.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "sre-agent.fullname" . }}-observer
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+rules:
+  # Read pods, events, logs across all namespaces
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Read deployments and replicasets
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Full access to our CRDs
+  - apiGroups: ["sre.yourdomain.io"]
+    resources: ["patchrequests", "patchrequests/status", "incidentrecords", "incidentrecords/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Patch deployments (for applying fixes)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["patch", "update"]
+  # Kopf framework needs these for its internal bookkeeping
+  - apiGroups: ["kopf.dev"]
+    resources: ["clusterkopfpeerings"]
+    verbs: ["get", "list", "watch", "patch", "create"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "sre-agent.fullname" . }}-observer-binding
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.controller.serviceAccount.name }}
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "sre-agent.fullname" . }}-observer
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

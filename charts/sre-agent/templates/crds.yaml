@@ -1,0 +1,128 @@
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: patchrequests.sre.yourdomain.io
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+spec:
+  group: sre.yourdomain.io
+  scope: Namespaced
+  names:
+    kind: PatchRequest
+    plural: patchrequests
+    singular: patchrequest
+    shortNames: ["pr"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Deployment
+          type: string
+          jsonPath: .spec.targetDeployment
+        - name: Error
+          type: string
+          jsonPath: .spec.errorState
+        - name: Severity
+          type: string
+          jsonPath: .spec.severity
+        - name: State
+          type: string
+          jsonPath: .status.approvalState
+        - name: Seen
+          type: integer
+          jsonPath: .status.seenCount
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["incidentId", "targetDeployment", "targetNamespace", "errorState"]
+              properties:
+                incidentId:
+                  type: string
+                targetDeployment:
+                  type: string
+                targetNamespace:
+                  type: string
+                errorState:
+                  type: string
+                  enum:
+                    - CrashLoopBackOff
+                    - OOMKilled
+                    - ImagePullBackOff
+                    - CreateContainerConfigError
+                    - ContainerCrashed
+                    - InitCrashLoopBackOff
+                rootCause:
+                  type: string
+                  maxLength: 500
+                severity:
+                  type: string
+                  enum: [low, medium, high, critical]
+                suggestedFix:
+                  type: string
+                  maxLength: 1000
+                proposedPatch:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                llmDiagnosis:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                autoRestartSafe:
+                  type: boolean
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: incidentrecords.sre.yourdomain.io
+  labels:
+    {{- include "sre-agent.labels" . | nindent 4 }}
+spec:
+  group: sre.yourdomain.io
+  scope: Cluster
+  names:
+    kind: IncidentRecord
+    plural: incidentrecords
+    singular: incidentrecord
+    shortNames: ["ir"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Deployment
+          type: string
+          jsonPath: .spec.deployment
+        - name: Error
+          type: string
+          jsonPath: .spec.errorState
+        - name: State
+          type: string
+          jsonPath: .spec.state
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+{{- end }}
