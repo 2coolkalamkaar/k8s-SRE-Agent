@@ -438,10 +438,22 @@ kubectl get pods -n monitoring
 ```bash
 helm install sre-agent ./charts/sre-agent/ \
   --set controller.env.vertexProject="your-gcp-project" \
-  --set gcpCredentials.enabled=true
+  --set gcpCredentials.enabled=true \
+  --set controller.env.alertWebhookUrl="https://hooks.slack.com/services/..."
 ```
 
 See [`charts/sre-agent/values.yaml`](./charts/sre-agent/values.yaml) for all configurable options.
+
+### Option C: Webhook Alerting (Slack/Discord/PagerDuty)
+
+The controller can automatically pipe structured JSON alerts containing the AI's root cause analysis and the proposed patch preview to any webhook destination. 
+
+If installing via standard manifests, simply add your webhook URL to the `ALERT_WEBHOOK_URL` environment variable in [`k8s/controller-deployment.yaml`](./k8s/controller-deployment.yaml). 
+
+If using Helm, pass it as a flag:
+```bash
+--set controller.env.alertWebhookUrl="https://discord.com/api/webhooks/..."
+```
 
 ---
 
@@ -553,7 +565,7 @@ All operational documentation is in the [`/docs`](./docs) directory:
 - [x] **Automated benchmark suite** — `scripts/run_benchmarks.py` with concrete metrics
 - [x] **Helm chart** — one-command install via `helm install`
 - [x] **GitHub Actions CI/CD** — test + build + push to GHCR on every PR/merge
-- [ ] **Slack/PagerDuty integration** — real-time incident notifications with RCA
+- [x] **Webhook Alerts** — real-time JSON payloads for Slack/Discord/PagerDuty
 - [ ] **Prometheus AlertManager webhook** — detect HTTP 500s, latency spikes
 - [ ] **MTTD/MTTR Grafana dashboard** — business-level SLO tracking
 - [ ] **Multi-namespace isolation** — per-namespace severity thresholds

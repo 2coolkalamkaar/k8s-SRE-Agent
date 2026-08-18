@@ -33,6 +33,7 @@ controller:
     watchNamespaces: "production"
     logLevel: "INFO"
     outcomeObservationWindow: "600"
+    alertWebhookUrl: ""
 
   # Probes
   livenessProbe:

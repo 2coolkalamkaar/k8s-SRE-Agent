@@ -57,6 +57,7 @@ from controller.log_preprocessor import (
 )
 from controller.llm_client import diagnose_incident
 import controller.telemetry as telemetry
+import controller.webhook_client as webhook_client
 import controller.outcome_checker  # noqa: F401 (Ensure kopf discovers the timer)
 
 logger = logging.getLogger(__name__)
@@ -565,9 +566,22 @@ async def _run_diagnosis_pipeline(
                 likely_recurring=diagnosis.get("likely_recurring", False),
             )
 
-            # ── Notify (stub — replace with real Slack client) ────────────────
+            # ── Notify via Webhook (Discord / webhook.site) ────────────────────
             severity = diagnosis.get("severity", "unknown")
             root_cause = diagnosis.get("root_cause", "Unknown")
+            patch_preview = str(proposed_patch.get("spec", "Annotation-only patch"))
+            
+            # Fire and forget async webhook alert
+            import asyncio
+            asyncio.create_task(webhook_client.send_incident_alert(
+                pr_name=pr_name,
+                deployment=deployment_name,
+                error_state=error_state,
+                severity=severity,
+                root_cause=root_cause,
+                patch_preview=patch_preview
+            ))
+
             logger.info(
                 "🔴 [%s] %s — %s/%s\n"
                 "   Root Cause: %s\n"

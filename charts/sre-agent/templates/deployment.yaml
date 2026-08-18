@@ -43,6 +43,8 @@ spec:
               value: {{ .Values.controller.env.logLevel | quote }}
             - name: OUTCOME_OBSERVATION_WINDOW
               value: {{ .Values.controller.env.outcomeObservationWindow | quote }}
+            - name: ALERT_WEBHOOK_URL
+              value: {{ .Values.controller.env.alertWebhookUrl | quote }}
             {{- if .Values.gcpCredentials.enabled }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/etc/gcp/credentials.json"
