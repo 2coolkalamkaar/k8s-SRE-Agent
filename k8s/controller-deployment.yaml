@@ -27,7 +27,7 @@ spec:
             - name: LLM_PROVIDER
               value: "auto"
             - name: VERTEX_PROJECT
-              value: "project-036ddc82-f451-4fae-9e3"
+              value: "sre-agent-project-505914"
             - name: VERTEX_LOCATION
               value: "us-central1"
             - name: VERTEX_MODEL
@@ -52,15 +52,34 @@ spec:
               value: "INFO"
             - name: OUTCOME_OBSERVATION_WINDOW
               value: "60"
-            - name: ALERT_WEBHOOK_URL
-              value: ""
+            - name: PGHOST
+              value: "postgres-svc.monitoring.svc.cluster.local"
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: database
+            - name: RAG_SIMILARITY_THRESHOLD
+              value: "0.75"
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "200m"
+              memory: "384Mi"
             limits:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "1"
+              memory: "768Mi"
           ports:
             - name: healthz
               containerPort: 8080

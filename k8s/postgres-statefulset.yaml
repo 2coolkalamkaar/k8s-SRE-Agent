@@ -16,6 +16,8 @@ metadata:
   namespace: monitoring
 data:
   init.sql: |
+    CREATE EXTENSION IF NOT EXISTS vector;
+
     CREATE TABLE IF NOT EXISTS incidents (
         id                SERIAL PRIMARY KEY,
         incident_id       VARCHAR(20) UNIQUE NOT NULL,
@@ -35,6 +37,7 @@ data:
         mttr_seconds      INTEGER,
         recurrence_count  INTEGER DEFAULT 1,
         tags              TEXT[],
+        embedding         vector(384),
         opened_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         investigating_at  TIMESTAMPTZ,
         resolved_at       TIMESTAMPTZ,
@@ -111,7 +114,7 @@ spec:
       priorityClassName: sre-monitoring
       containers:
         - name: postgres
-          image: postgres:15-alpine
+          image: pgvector/pgvector:pg15
           env:
             - name: POSTGRES_USER
               valueFrom:

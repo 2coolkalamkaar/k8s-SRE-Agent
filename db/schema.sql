@@ -1,5 +1,10 @@
 -- K8s SRE Agent PostgreSQL Database Schema
 
+-- Enables the `vector` type used below for RAG similarity search.
+-- Requires the pgvector extension to be present in the Postgres image
+-- (see k8s/postgres-statefulset.yaml — pgvector/pgvector:pg15).
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS incidents (
     id                SERIAL PRIMARY KEY,
     incident_id       VARCHAR(20) UNIQUE NOT NULL,    -- INC-2026-0047
@@ -19,6 +24,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     mttr_seconds      INTEGER,
     recurrence_count  INTEGER DEFAULT 1,
     tags              TEXT[],
+    embedding         vector(384),                     -- RAG: semantic embedding of cleaned crash logs
     opened_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     investigating_at  TIMESTAMPTZ,
     resolved_at       TIMESTAMPTZ,
