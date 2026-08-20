@@ -175,7 +175,7 @@ async def find_similar_incident(embedding: list[float], error_state: str) -> dic
                   AND worked = true
                   AND embedding IS NOT NULL
                   AND patch_applied IS NOT NULL
-                ORDER BY embedding <=> $1::vector
+                ORDER BY embedding <=> $1::vector, opened_at DESC
                 LIMIT 1
                 """,
                 _to_vector(embedding), error_state,

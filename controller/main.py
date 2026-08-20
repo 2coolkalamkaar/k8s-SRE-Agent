@@ -43,6 +43,7 @@ from kubernetes_asyncio import client as k8s_client, config as k8s_config
 from controller.dedup import (
     check_fingerprint_cache,
     clear_dampening,
+    clear_fingerprint,
     has_open_patchrequest,
     increment_seen_count,
     register_fingerprint,
@@ -484,8 +485,14 @@ async def _run_diagnosis_pipeline(
                 )
                 if telemetry.dedup_hits_counter:
                     telemetry.dedup_hits_counter.add(1, {"layer": "l2_fingerprint", "namespace": namespace})
-                await increment_seen_count(existing_pr, namespace, custom_api)
-                return
+                still_exists = await increment_seen_count(existing_pr, namespace, custom_api)
+                if still_exists:
+                    return
+                # Cached fingerprint pointed at a PatchRequest that's gone (approved,
+                # closed, or manually deleted) — purge the stale entry and fall
+                # through so this recurrence is actually diagnosed instead of
+                # silently dropped.
+                await clear_fingerprint(fingerprint)
 
             # ── Layer 3: Active PatchRequest check ────────────────────────────
             with telemetry_tracer.start_as_current_span("sre.dedup.l3_pr_check",
@@ -500,8 +507,11 @@ async def _run_diagnosis_pipeline(
                 )
                 if telemetry.dedup_hits_counter:
                     telemetry.dedup_hits_counter.add(1, {"layer": "l3_pr_check", "namespace": namespace})
-                await increment_seen_count(existing_pr, namespace, custom_api)
-                return
+                still_exists = await increment_seen_count(existing_pr, namespace, custom_api)
+                if still_exists:
+                    return
+                # Rare race: the PR was deleted between the has_open_patchrequest
+                # check above and this increment — fall through and diagnose fresh.
 
             # ── All 3 layers passed → call LLM ────────────────────────────────
             incident_id = _make_incident_id()
