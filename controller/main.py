@@ -45,6 +45,7 @@ from controller.dedup import (
     clear_dampening,
     clear_fingerprint,
     has_open_patchrequest,
+    has_open_patchrequest_for_node,
     increment_seen_count,
     register_fingerprint,
     should_trigger,
@@ -52,13 +53,17 @@ from controller.dedup import (
 from controller.incident import Incident
 import controller.db as db
 import controller.embeddings as embeddings
+import controller.triage as triage
+import controller.actions as actions
 from controller.log_preprocessor import (
     detect_error_state,
     detect_init_error_state,
+    detect_node_condition,
     make_fingerprint,
     preprocess_logs,
+    strip_heartbeat,
 )
-from controller.llm_client import diagnose_incident, ValidatorAgent
+from controller.llm_client import diagnose_incident, diagnose_node_incident, ValidatorAgent
 import controller.telemetry as telemetry
 import controller.webhook_client as webhook_client
 import controller.outcome_checker  # noqa: F401 (Ensure kopf discovers the timer)
@@ -196,25 +201,40 @@ async def _create_patch_request_crd(
     incident_id: str,
     diagnosis: dict,
     custom_api: k8s_client.CustomObjectsApi,
+    target_node: str | None = None,
 ) -> str:
-    """Create a PatchRequest CRD object in K8s and return its name."""
-    pr_name = f"{deployment_name}-{incident_id.lower().replace('inc-', 'pr-')}"
+    """
+    Create a PatchRequest CRD object in K8s and return its name.
+
+    For domain=node incidents, `deployment_name` is the empty string and
+    `target_node` carries the node name instead — there's no Deployment to
+    key the PatchRequest name off, so the node name is used instead.
+    """
+    key = target_node or deployment_name
+    pr_name = f"{key}-{incident_id.lower().replace('inc-', 'pr-')}"
+    labels = {
+        "incident-id": incident_id,
+        "source": diagnosis.get("source", "ai_pipeline"),
+    }
+    if target_node:
+        labels["target-node"] = target_node
+    else:
+        labels["target-deployment"] = deployment_name
+
     body = {
         "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
         "kind": "PatchRequest",
         "metadata": {
             "name": pr_name,
             "namespace": namespace,
-            "labels": {
-                "target-deployment": deployment_name,
-                "incident-id": incident_id,
-                "source": diagnosis.get("source", "ai_pipeline"),
-            },
+            "labels": labels,
         },
         "spec": {
             "incidentId": incident_id,
             "targetDeployment": deployment_name,
             "targetNamespace": namespace,
+            "targetNode": target_node or "",
+            "blastRadius": diagnosis.get("blast_radius", ""),
             "errorState": diagnosis.get("error_state", ""),
             "rootCause": diagnosis.get("root_cause", "")[:500],
             "severity": diagnosis.get("severity", "high"),
@@ -225,6 +245,8 @@ async def _create_patch_request_crd(
             "autoRestartSafe": diagnosis.get("auto_restart_safe", False),
             "likelyRecurring": diagnosis.get("likely_recurring", False),
             "proposedPatch": diagnosis.get("proposed_patch") or {},
+            "proposedActions": diagnosis.get("proposed_actions") or [],
+            "domain": diagnosis.get("domain", "pod"),
             "llmDiagnosis": diagnosis,
         },
         "status": {
@@ -463,7 +485,15 @@ async def _run_diagnosis_pipeline(
             pod_context = await _build_pod_context(body, container_statuses)
             pod_context["error_state"] = error_state
             pod_context["deployment"] = deployment_name
-            
+
+            # ── Triage: sort this signal into a domain before diagnosing ───────
+            # Phase 1 only wires the pod watcher through triage — node/cluster/app
+            # watchers (and their domains) are added in later phases. This call
+            # is free (rule-based, no LLM) for the "pod_status" source.
+            domain, _resource_ref = triage.classify_domain(
+                "pod_status", {"namespace": namespace, "deployment": deployment_name}
+            )
+
             # Fetch deployment spec for Fixer Agent
             apps_api = k8s_client.AppsV1Api()
             deployment = await apps_api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
@@ -576,6 +606,7 @@ async def _run_diagnosis_pipeline(
                             "matches_past_incident": rag_match["incident_id"],
                             "confidence_boost": "high",
                             "proposed_patch": rag_match["patch_applied"],
+                            "proposed_actions": [{"type": "patch_deployment", "params": {"patch": rag_match["patch_applied"]}}],
                             "source": "rag_cache",
                         }
                         if telemetry.rag_hits_counter:
@@ -596,6 +627,7 @@ async def _run_diagnosis_pipeline(
                 )
                 diagnosis["source"] = "ai_pipeline"
             diagnosis["error_state"] = error_state
+            diagnosis["domain"] = domain.value
 
             # ── Build Incident domain object ──────────────────────────────────
             incident = Incident(
@@ -665,6 +697,137 @@ async def _run_diagnosis_pipeline(
             await custom_api.api_client.close()
 
 
+# ── Node Watch Handler (Phase 2: Node domain) ─────────────────────────────────
+# PatchRequests/IncidentRecords for node problems are filed under this
+# namespace since a Node isn't itself namespaced — there's no natural
+# namespace to use otherwise.
+CLUSTER_INCIDENT_NAMESPACE = os.getenv("CLUSTER_INCIDENT_NAMESPACE", "monitoring")
+
+
+@kopf.on.field("nodes", field="status.conditions")
+async def on_node_condition_change(body, name, old, new, logger, **kwargs):
+    """
+    Watches every Node's status.conditions for problems (NotReady,
+    DiskPressure, MemoryPressure, PIDPressure, NetworkUnavailable).
+
+    Node conditions carry a lastHeartbeatTime that updates roughly every 40s
+    from the kubelet even when nothing changed — comparing old/new after
+    stripping that out (strip_heartbeat) avoids re-running diagnosis on every
+    heartbeat for a node that's been unhealthy for hours.
+    """
+    if strip_heartbeat(old) == strip_heartbeat(new):
+        return
+
+    condition = detect_node_condition(new)
+    if condition is None:
+        return  # node is healthy (or recovered) — nothing to do
+
+    await _run_node_diagnosis_pipeline(node_name=name, condition=condition, conditions=new)
+
+
+async def _run_node_diagnosis_pipeline(node_name: str, condition: str, conditions: list) -> None:
+    await _ensure_k8s_configured()
+    core_api = k8s_client.CoreV1Api()
+    custom_api = k8s_client.CustomObjectsApi()
+
+    telemetry_tracer = telemetry.get_tracer()
+    with telemetry_tracer.start_as_current_span(
+        "sre.node_diagnosis.pipeline",
+        attributes={"node": node_name, "condition": condition},
+    ) as pipeline_span:
+        try:
+            domain, _resource_ref = triage.classify_domain("node_condition", {"node_name": node_name})
+
+            # ── Layer 3 equivalent: skip if a PatchRequest is already open ─────
+            has_pr, existing_pr = await has_open_patchrequest_for_node(
+                CLUSTER_INCIDENT_NAMESPACE, node_name, condition, custom_api
+            )
+            if has_pr:
+                logger.info("[dedup-node] %s: active PR exists (%s) — skipping", node_name, existing_pr)
+                if telemetry.dedup_hits_counter:
+                    telemetry.dedup_hits_counter.add(1, {"layer": "node_pr_check", "namespace": CLUSTER_INCIDENT_NAMESPACE})
+                return
+
+            # ── Gather node context: capacity, and blast radius ────────────────
+            node_obj = await core_api.read_node(name=node_name)
+            node_dict = custom_api.api_client.sanitize_for_serialization(node_obj)
+
+            all_pods = await core_api.list_pod_for_all_namespaces(field_selector=f"spec.nodeName={node_name}")
+            # DaemonSet pods are excluded from blast-radius / drain candidates —
+            # kubectl drain skips them too, since they're meant to run on every
+            # node and evicting them doesn't reduce load the way it does for a
+            # normal Deployment-owned pod.
+            pod_refs = []
+            namespaces = set()
+            for pod in all_pods.items:
+                owners = pod.metadata.owner_references or []
+                if any(o.kind == "DaemonSet" for o in owners):
+                    continue
+                pod_refs.append({"name": pod.metadata.name, "namespace": pod.metadata.namespace})
+                namespaces.add(pod.metadata.namespace)
+
+            node_context = {
+                "node_name": node_name,
+                "condition": condition,
+                "conditions": conditions,
+                "capacity": node_dict.get("status", {}).get("capacity", {}),
+                "allocatable": node_dict.get("status", {}).get("allocatable", {}),
+                "pod_count": len(pod_refs),
+                "namespaces": sorted(namespaces),
+                "pod_refs": pod_refs,
+            }
+
+            incident_id = _make_incident_id()
+            logger.info("[%s] New node incident: %s in state %s", incident_id, node_name, condition)
+            if telemetry.incidents_counter:
+                telemetry.incidents_counter.add(1, {
+                    "namespace": CLUSTER_INCIDENT_NAMESPACE, "deployment": node_name, "error_state": condition,
+                })
+
+            diagnosis = await diagnose_node_incident(node_context, incident_id)
+            diagnosis["error_state"] = condition
+            diagnosis["domain"] = domain.value
+            diagnosis["source"] = "ai_pipeline"
+
+            fingerprint = make_fingerprint(str(node_context.get("conditions")), condition)
+
+            incident = Incident(
+                incident_id=incident_id,
+                error_state=condition,
+                error_fingerprint=fingerprint,
+                target_deployment="",
+                target_namespace=CLUSTER_INCIDENT_NAMESPACE,
+            )
+            incident.start_investigation(diagnosis)
+
+            pr_name = await _create_patch_request_crd(
+                CLUSTER_INCIDENT_NAMESPACE, "", incident_id, diagnosis, custom_api, target_node=node_name,
+            )
+            await _create_incident_record_crd(incident, custom_api)
+            await db.save_incident(incident)
+
+            if telemetry.patchrequests_counter:
+                telemetry.patchrequests_counter.add(1, {"namespace": CLUSTER_INCIDENT_NAMESPACE, "outcome": "created"})
+
+            logger.info(
+                "🔴 [%s] %s — node/%s\n"
+                "   Root Cause: %s\n"
+                "   Blast Radius: %s\n"
+                "   PatchRequest: kubectl get pr %s -n %s",
+                diagnosis.get("severity", "unknown").upper(), condition, node_name,
+                diagnosis.get("root_cause", "Unknown"),
+                diagnosis.get("blast_radius", "unknown"),
+                pr_name, CLUSTER_INCIDENT_NAMESPACE,
+            )
+
+        except Exception as exc:
+            pipeline_span.record_exception(exc)
+            logger.exception("Node diagnosis pipeline failed for node %s: %s", node_name, exc)
+        finally:
+            await core_api.api_client.close()
+            await custom_api.api_client.close()
+
+
 # ── PatchRequest Executor Handler ─────────────────────────────────────────────
 
 @kopf.on.field(
@@ -688,6 +851,11 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
     target_namespace = spec.get("targetNamespace", namespace)
     proposed_patch = spec.get("proposedPatch", {})
     approved_by = body.get("status", {}).get("approvedBy", "unknown")
+    domain = spec.get("domain", "pod")
+
+    if domain == "node":
+        await _execute_node_actions(body, name, target_namespace, approved_by, logger)
+        return
 
     logger.info(
         "[%s] PatchRequest approved by %s — applying patch to %s/%s",
@@ -793,4 +961,54 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
         logger.exception("[%s] Patch execution failed: %s", name, exc)
     finally:
         await apps_api.api_client.close()
+        await custom_api.api_client.close()
+
+
+async def _execute_node_actions(body: dict, name: str, namespace: str, approved_by: str, logger) -> None:
+    """
+    Executes an approved node-domain action plan (cordon_node today;
+    drain_node refuses to run for real — see actions.py). This is the
+    action-plugin system's first real caller on the execute() side, not
+    just the dry-run side Phase 1 proved out.
+
+    Unlike the pod/deployment path, this does not hand off to
+    outcome_checker's health-polling loop afterward — there's no
+    Deployment to health-check, and "is a cordoned node okay now" isn't
+    something that resolves on its own the way a pod restart does. The
+    PatchRequest is marked Applied and left there for a human to close once
+    they're satisfied (e.g. after replacing failed hardware).
+    """
+    spec = body.get("spec", {})
+    target_node = spec.get("targetNode", "")
+    action_list = spec.get("proposedActions", [])
+
+    logger.info("[%s] PatchRequest approved by %s — executing node actions on %s", name, approved_by, target_node)
+
+    if not target_node or not action_list:
+        logger.warning("[%s] No target node or no actions — skipping", name)
+        return
+
+    await _ensure_k8s_configured()
+    custom_api = k8s_client.CustomObjectsApi()
+
+    try:
+        context = {"node_name": target_node}
+        results = await actions.execute_all(action_list, context)
+
+        all_ok = all(r["ok"] for r in results)
+        now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        await custom_api.patch_namespaced_custom_object_status(
+            group=CRD_GROUP, version=CRD_VERSION, namespace=namespace,
+            plural="patchrequests", name=name,
+            body={"status": {
+                "approvalState": "Applied" if all_ok else "Failed",
+                "appliedAt": now_iso,
+            }},
+            _content_type="application/merge-patch+json",
+        )
+        logger.info("[%s] Node action results: %s", name, results)
+
+    except Exception as exc:
+        logger.exception("[%s] Node action execution failed: %s", name, exc)
+    finally:
         await custom_api.api_client.close()

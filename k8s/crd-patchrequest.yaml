@@ -56,6 +56,12 @@ spec:
                   type: string
                 targetNamespace:
                   type: string
+                targetNode:
+                  type: string
+                  description: "Set instead of targetDeployment for domain=node incidents."
+                blastRadius:
+                  type: string
+                  description: "Human-readable impact estimate (e.g. '12 pods across 3 namespaces') — populated for node/cluster domains, shown prominently to the approver."
                 errorState:
                   type: string
                   enum:
@@ -65,6 +71,11 @@ spec:
                     - CreateContainerConfigError
                     - ContainerCrashed
                     - InitCrashLoopBackOff
+                    - NodeNotReady
+                    - DiskPressure
+                    - MemoryPressure
+                    - PIDPressure
+                    - NetworkUnavailable
                 rootCause:
                   type: string
                   maxLength: 500
@@ -89,6 +100,16 @@ spec:
                 proposedPatch:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
+                proposedActions:
+                  type: array
+                  description: "Pluggable action plan (Phase 1: patch_deployment only). Coexists with proposedPatch for backward compatibility."
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                domain:
+                  type: string
+                  description: "What kind of problem this is — decides which agent prompts and action types apply."
+                  enum: [pod, node, cluster, app]
                 llmDiagnosis:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true

@@ -145,6 +145,51 @@ def detect_error_state(container_statuses: list[dict]) -> str | None:
     return None
 
 
+# Node conditions that mean "something is wrong" when in this state.
+# Ready is inverted (False/Unknown = bad); the rest are True = bad.
+_BAD_NODE_CONDITIONS = {
+    "Ready": "False",       # or "Unknown" — checked separately below
+    "DiskPressure": "True",
+    "MemoryPressure": "True",
+    "PIDPressure": "True",
+    "NetworkUnavailable": "True",
+}
+
+# Node conditions carry a lastHeartbeatTime that updates every ~40s from the
+# kubelet even when nothing is actually wrong. Stripping it out before
+# comparing old vs new prevents re-triggering diagnosis on every heartbeat —
+# the same problem pod dedup already solves for crash loops, applied here to
+# avoid spamming diagnosis for a node that's been unhealthy for hours.
+def strip_heartbeat(conditions: list[dict]) -> list[tuple]:
+    return sorted(
+        (c.get("type"), c.get("status"), c.get("reason")) for c in (conditions or [])
+    )
+
+
+def detect_node_condition(conditions: list[dict]) -> str | None:
+    """
+    Parse a Node's status.conditions list and return the canonical problem
+    name if the node is unhealthy, else None. Mirrors detect_error_state's
+    shape/contract but for nodes instead of pods.
+    """
+    if not conditions:
+        return None
+
+    by_type = {c.get("type"): c.get("status") for c in conditions}
+
+    ready = by_type.get("Ready")
+    if ready in ("False", "Unknown"):
+        return "NodeNotReady"
+
+    for cond_type, bad_status in _BAD_NODE_CONDITIONS.items():
+        if cond_type == "Ready":
+            continue
+        if by_type.get(cond_type) == bad_status:
+            return cond_type  # e.g. "DiskPressure"
+
+    return None
+
+
 def detect_init_error_state(init_container_statuses: list[dict]) -> str | None:
     """
     Parse Kubernetes initContainerStatuses and return a canonical error state

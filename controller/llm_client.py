@@ -11,6 +11,8 @@ import time
 import httpx
 from kubernetes_asyncio import client as k8s_client
 
+import controller.actions as actions
+
 try:
     from google import genai
     GENAI_SDK_AVAILABLE = True
@@ -141,6 +143,9 @@ If modifying a container in a Deployment, you MUST include the container 'name' 
 class ValidatorAgent:
     @staticmethod
     async def validate(namespace: str, deployment_name: str, patch: dict) -> tuple[bool, str]:
+        """Legacy single-patch validation path — still used by the RAG reuse
+        flow in main.py, where a past incident's stored patch_applied is a
+        raw patch dict, not an action list."""
         if not patch:
             return True, ""
         try:
@@ -155,6 +160,137 @@ class ValidatorAgent:
             return True, ""
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    async def validate_actions(
+        namespace: str | None, deployment_name: str | None, action_list: list[dict],
+        node_name: str | None = None,
+    ) -> tuple[bool, str]:
+        """New action-plan validation path — dry-runs every action in the
+        plan via the pluggable action registry (controller/actions.py)."""
+        context = {"namespace": namespace, "deployment_name": deployment_name, "node_name": node_name}
+        return await actions.dry_run_all(action_list, context)
+
+class NodeAnalystAgent:
+    """Domain-specific Analyst for node problems. Separate from AnalystAgent
+    (pod domain) because the questions are genuinely different: 'why is this
+    node unhealthy' looks at capacity/conditions/blast-radius, not container
+    logs — forcing one prompt to cover both makes it vague at everything."""
+
+    @staticmethod
+    async def analyze(node_context: dict, incident_id: str) -> dict:
+        prompt = f"""You are an expert Kubernetes SRE analyzing an unhealthy cluster Node
+(not a pod — a physical/virtual machine that runs pods).
+Respond in valid JSON format: {{"root_cause": "exact reason", "severity": "low|medium|high|critical", "likely_recurring": true, "estimated_impact": "impact"}}
+
+=== NODE ===
+Name: {node_context.get('node_name')}
+Problem: {node_context.get('condition')}
+Condition details: {json.dumps(node_context.get('conditions', []), indent=2)}
+Capacity: {json.dumps(node_context.get('capacity', {}), indent=2)}
+Allocatable: {json.dumps(node_context.get('allocatable', {}), indent=2)}
+
+=== BLAST RADIUS ===
+Pods currently scheduled on this node: {node_context.get('pod_count', 0)}
+Namespaces affected: {', '.join(node_context.get('namespaces', [])) or 'none'}
+"""
+        raw = await _generate_content(prompt, incident_id)
+        return _parse_json(raw)
+
+
+class NodeFixerAgent:
+    """Proposes an action plan for a node problem. Unlike the pod-domain
+    Fixer, this never produces a Deployment patch — the available moves are
+    cordon (stop new scheduling) and drain (move existing pods off), which
+    is why the output is action-plan-shaped from the start rather than
+    wrapped into that shape after the fact."""
+
+    @staticmethod
+    async def propose_fix(rca: dict, node_context: dict, incident_id: str) -> dict:
+        prompt = f"""You are an expert Kubernetes Infrastructure Engineer deciding how to
+respond to an unhealthy Node. You can ONLY choose from these two actions —
+you cannot patch a Deployment to fix a node problem:
+  - "cordon_node": stops new pods being scheduled on this node. Low risk —
+    does not touch pods already running there.
+  - "drain_node": moves existing pods off this node. Higher risk — can
+    disrupt running workloads. Only recommend this for severe/persistent
+    problems (e.g. DiskPressure, not a transient blip).
+
+Respond in valid JSON: {{"suggested_fix_description": "plain-language description",
+"actions": [{{"type": "cordon_node", "params": {{}}}}]}}
+(the node_name parameter will be filled in automatically — do not include it)
+If no action is warranted yet (e.g. problem looks transient), return {{"actions": []}}.
+
+=== ROOT CAUSE ANALYSIS ===
+{json.dumps(rca, indent=2)}
+
+=== NODE CONTEXT ===
+{json.dumps(node_context, indent=2)}
+"""
+        raw = await _generate_content(prompt, incident_id)
+        return _parse_json(raw)
+
+
+async def diagnose_node_incident(node_context: dict, incident_id: str) -> dict:
+    """
+    Node-domain counterpart to diagnose_incident(). Kept as a separate
+    function rather than branching inside diagnose_incident() — the two
+    pipelines share almost no logic (different agents, different action
+    types, no Fixer retry-on-validation-error loop since node actions are
+    simple enough not to need it yet), so merging them would mostly be
+    if/else scaffolding around two unrelated flows.
+    """
+    logger.info("[%s] Starting Node Remediation Pipeline (domain=node)", incident_id)
+
+    try:
+        rca = await NodeAnalystAgent.analyze(node_context, incident_id)
+        logger.info("[%s] Node Analyst RCA: %s", incident_id, rca.get("root_cause", "N/A"))
+    except Exception as exc:
+        logger.error("[%s] Node Analyst Agent failed with exception: %s", incident_id, exc)
+        rca = {}
+
+    try:
+        fix_result = await NodeFixerAgent.propose_fix(rca, node_context, incident_id)
+    except Exception as exc:
+        logger.error("[%s] Node Fixer Agent failed with exception: %s", incident_id, exc)
+        fix_result = {}
+
+    proposed_actions = fix_result.get("actions", [])
+    # Fill in node_name server-side rather than trusting the LLM to echo it
+    # back correctly — this is the one parameter that must never be wrong.
+    for action in proposed_actions:
+        action.setdefault("params", {})["node_name"] = node_context.get("node_name")
+        if action.get("type") == "drain_node":
+            action["params"]["pods"] = node_context.get("pod_refs", [])
+
+    validated = False
+    if proposed_actions:
+        logger.info("[%s] Validator Agent dry-running node action plan", incident_id)
+        is_valid, error_msg = await ValidatorAgent.validate_actions(
+            None, None, proposed_actions, node_name=node_context.get("node_name")
+        )
+        if is_valid:
+            logger.info("[%s] ✅ Validator Agent approved node action plan", incident_id)
+            validated = True
+        else:
+            logger.warning("[%s] ❌ Validator Agent rejected node action plan: %s", incident_id, error_msg)
+
+    return {
+        "root_cause": rca.get("root_cause", "Analysis failed"),
+        "severity": rca.get("severity", "high"),
+        "suggested_fix": fix_result.get("suggested_fix_description", "Manual investigation required."),
+        "auto_restart_safe": False,  # node actions are never treated as auto-safe
+        "config_suggestions": [],
+        "likely_recurring": rca.get("likely_recurring", False),
+        "estimated_impact": rca.get("estimated_impact", "Unknown"),
+        "matches_past_incident": None,
+        "confidence_boost": "high" if validated else "none",
+        "proposed_patch": {},
+        "proposed_actions": proposed_actions if validated else [],
+        "blast_radius": f"{node_context.get('pod_count', 0)} pod(s) across "
+                         f"{len(node_context.get('namespaces', []))} namespace(s)",
+    }
+
 
 # ── Orchestrator ───────────────────────────────────────────────────────────────
 
@@ -193,10 +329,19 @@ async def diagnose_incident(
         if not patch:
             logger.info("[%s] Fixer Agent determined no patch applies", incident_id)
             break
-            
+
+        # Wrap the Fixer's raw patch into the pluggable action-plan format.
+        # patch_deployment is the only action type Phase 1 implements — this
+        # is purely a shape change, the actual patch content the Fixer
+        # produced is untouched, so existing pod/deployment behavior does
+        # not change.
+        action_list = [{"type": "patch_deployment", "params": {"patch": patch}}]
+
         logger.info("[%s] Validator Agent dry-running patch", incident_id)
-        is_valid, error_msg = await ValidatorAgent.validate(pod_context.get("namespace"), pod_context.get("deployment"), patch)
-        
+        is_valid, error_msg = await ValidatorAgent.validate_actions(
+            pod_context.get("namespace"), pod_context.get("deployment"), action_list
+        )
+
         if is_valid:
             logger.info("[%s] ✅ Validator Agent approved patch", incident_id)
             patch_result["validation_passed"] = True
@@ -205,7 +350,14 @@ async def diagnose_incident(
             logger.warning("[%s] ❌ Validator Agent rejected patch: %s", incident_id, error_msg)
             validation_error = error_msg
 
-    # Format output for PR creation
+    validated_patch = patch_result.get("patch", {}) if patch_result.get("validation_passed") else {}
+
+    # Format output for PR creation.
+    # proposed_patch is kept exactly as before (the executor and RAG reuse
+    # path still read this field — no behavior change for pod/deployment
+    # incidents). proposed_actions is the same fix expressed in the new
+    # pluggable shape, ready for node/cluster/app action types to sit
+    # alongside patch_deployment once those phases are built.
     return {
         "root_cause": rca.get("root_cause", "Analysis failed"),
         "severity": rca.get("severity", "high"),
@@ -216,5 +368,6 @@ async def diagnose_incident(
         "estimated_impact": rca.get("estimated_impact", "Unknown"),
         "matches_past_incident": None,
         "confidence_boost": "high" if patch_result.get("validation_passed") else "none",
-        "proposed_patch": patch_result.get("patch", {}) if patch_result.get("validation_passed") else {}
+        "proposed_patch": validated_patch,
+        "proposed_actions": [{"type": "patch_deployment", "params": {"patch": validated_patch}}] if validated_patch else [],
     }

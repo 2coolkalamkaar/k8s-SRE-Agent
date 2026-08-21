@@ -226,24 +226,28 @@ what makes this a genuine security feature rather than "a log we promise not to 
 Build this in the order below — each step is independently useful and testable before moving to
 the next, so we're never stuck with half-finished work:
 
-1. **Triage layer** (Piece 2) — build `classify_domain()`, wire it into the existing
+1. **Signed audit log** (Piece 7) — build this first and independently of everything else. It
+   doesn't depend on triage, domains, or the action-plan refactor at all — it plugs into the
+   *existing* pod/deployment approval flow today, so it's shippable and demoable immediately,
+   while doubling as the audit trail every later domain (node/cluster) will also need.
+2. **Triage layer** (Piece 2) — build `classify_domain()`, wire it into the existing
    pod-detection path only for now. Nothing user-visible changes yet, but this is the foundation
    everything else needs.
-2. **Action-plan contract** (Piece 4) — change the Fixer's output shape, update the
+3. **Action-plan contract** (Piece 4) — change the Fixer's output shape, update the
    Validator/Executor to the plugin pattern (Piece 5), but initially only implement one action
    type: `patch_deployment` (the thing already done today). This step is a pure refactor —
    behavior for existing pod/deployment incidents shouldn't change at all. Test thoroughly here
    before moving on, since everything downstream depends on this being solid.
-3. **Domain-aware Analyst prompts** (Piece 3) — still only for the `pod` domain for now, just
+4. **Domain-aware Analyst prompts** (Piece 3) — still only for the `pod` domain for now, just
    proving the domain-based prompt-switching mechanism works.
-4. **Widen detection to Nodes** (Piece 1, option A half) — add the Node watcher, wire it through
+5. **Widen detection to Nodes** (Piece 1, option A half) — add the Node watcher, wire it through
    triage → Analyst (node prompt) → Fixer. Implement the `cordon_node` and `drain_node` action
    types.
-5. **Blast-radius-aware approval** (Piece 6) — add this now that node-domain incidents exist,
+6. **Blast-radius-aware approval** (Piece 6) — add this now that node-domain incidents exist,
    before letting node fixes run unsupervised.
-6. **Widen detection to cluster-wide Events** — same pattern as step 4, add
+7. **Widen detection to cluster-wide Events** — same pattern as step 5, add
    `patch_resourcequota` and similar action types as needed.
-7. **App-level detection via Prometheus** (Piece 1, option B) — this is the most different from
+8. **App-level detection via Prometheus** (Piece 1, option B) — this is the most different from
    what exists today (webhook receiver, alert rules), so it's saved for last after the
    domain/action-plan machinery has been proven out on the more direct K8s-native domains.
 
@@ -262,9 +266,12 @@ the next, so we're never stuck with half-finished work:
 | `controller/db.py` | RAG lookup skips cache for non-pod domains |
 | `k8s/crd-patchrequest.yaml` | `proposedPatch` → `proposedActions` (list) |
 | `k8s/observability/prometheus.yaml` | New alert rules for app-level detection |
-| Dashboard | Shows domain + blast radius on each incident |
+| Dashboard | Shows domain + blast radius on each incident; new Audit Log view with a "Verify Integrity" button |
+| `controller/audit.py` *(new)* | Hash-chained append-only audit log: `record()` and `verify_chain()` |
+| `db/schema.sql` / `k8s/postgres-statefulset.yaml` | New `audit_log` table (`entry_hash`, `prev_hash`, `incident_id`, `action_type`, `actor`, `reason`, `timestamp`, payload) |
 
-This is a genuinely large body of work — step 2 alone (the action-plan refactor) touches the core
-of every agent. Treat steps 1-3 as one deliverable (foundation, no new user-facing capability yet,
-but nothing should break), then each domain (node, cluster, app) as its own separate deliverable
-after that.
+This is a genuinely large body of work. Step 1 (audit log) is independently shippable and demoable
+right away. Step 3 (the action-plan refactor) is the heaviest lift — it touches the core of every
+agent — so treat steps 2-4 as one foundation deliverable (no new user-facing capability yet, but
+nothing existing should break), then each domain (node, cluster, app) as its own separate
+deliverable after that.

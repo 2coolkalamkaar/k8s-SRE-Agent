@@ -159,6 +159,14 @@ async def outcome_checker_timer(body, name, namespace, logger, **kwargs):
         return
 
     spec = body.get("spec", {})
+
+    # Node-domain PatchRequests have no Deployment to health-check, and a
+    # cordoned node doesn't "resolve" on its own the way a pod restart does
+    # — it stays Applied until a human closes it once satisfied (e.g. after
+    # replacing hardware). Auto-observation for this domain is deferred.
+    if spec.get("domain") == "node":
+        return
+
     deployment_name = spec.get("targetDeployment")
     target_namespace = spec.get("targetNamespace", namespace)
     observation_start = body.get("status", {}).get("observationStartTime")

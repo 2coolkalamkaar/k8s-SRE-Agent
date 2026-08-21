@@ -19,6 +19,32 @@ rules:
   - apiGroups: [""]
     resources: [pods, pods/log, pods/status, events, namespaces, configmaps]
     verbs: [get, list, watch, patch, update]   # patch needed by Kopf to write status annotations
+  # Node visibility — needed to detect NodeNotReady/DiskPressure/etc. and to
+  # count pods-on-a-node for blast-radius reporting. `patch` is required even
+  # though most of this SA's node usage is read-only — kopf writes its own
+  # bookkeeping annotations onto every object it watches (same reason the
+  # `pods` rule above needs it).
+  #
+  # IMPORTANT — discovered while building the Node domain, not designed this
+  # way on purpose: controller-deployment.yaml runs the ENTIRE controller
+  # (including the code that's supposed to be the "least-privilege executor")
+  # under this single ServiceAccount. sre-executor-sa/sre-executor-role below
+  # are defined but never bound to any running pod — the "separate
+  # least-privilege executor" security model described in this file's
+  # comments and in the README is aspirational, not actually enforced at
+  # runtime today. So the node/eviction verbs a real executor would need
+  # (patching spec.unschedulable, dry-run pod eviction) are granted HERE,
+  # on the observer role, because this is the identity actually in use.
+  # Deliberately not splitting this into two real identities: the actual
+  # safety boundary in this system is that every change requires a human to
+  # approve a PatchRequest first, not which internal identity ran the code.
+  # See docs/decisions/phase2_rca.md for the full reasoning.
+  - apiGroups: [""]
+    resources: [nodes, nodes/status]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
   # Read and patch deployments to trace pod → deployment ownership and apply approved patches
   - apiGroups: [apps]
     resources: [deployments, replicasets, statefulsets, deployments/rollback]
@@ -58,8 +84,9 @@ metadata:
   labels:
     app: sre-controller
 ---
-# sre-executor-sa: ONLY allowed to patch Deployments/StatefulSets/ConfigMaps
-# Explicitly cannot touch Secrets, RBAC, Nodes, or PersistentVolumes.
+# sre-executor-sa: ONLY allowed to patch Deployments/StatefulSets/ConfigMaps,
+# plus (as of the Node domain) cordon nodes and dry-run pod evictions.
+# Explicitly cannot touch Secrets, RBAC, or PersistentVolumes.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -74,6 +101,18 @@ rules:
   - apiGroups: [sre.yourdomain.io]
     resources: [patchrequests, patchrequests/status]
     verbs: [get, patch, update]
+  # Cordon (spec.unschedulable) only — no delete/evict rights on the Node
+  # object itself.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, patch]
+  # Needed even for a dry-run eviction call — the API server checks RBAC
+  # before it checks the dry-run flag. drain_node's execute() refuses to run
+  # for real regardless (see controller/actions.py); this permission only
+  # ever backs a dry-run today.
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

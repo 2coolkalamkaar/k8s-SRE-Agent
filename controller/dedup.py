@@ -149,6 +149,41 @@ async def has_open_patchrequest(
     return False, None
 
 
+async def has_open_patchrequest_for_node(
+    namespace: str,
+    node_name: str,
+    error_state: str,
+    custom_api,
+) -> tuple[bool, str | None]:
+    """
+    Node-domain counterpart to has_open_patchrequest(). Kept separate rather
+    than generalizing the pod version — node conditions keep re-triggering
+    kopf's field watcher on every kubelet heartbeat even while a fix is
+    already Applied and being observed, so "Applied" also counts as open
+    here (unlike the pod version, where Applied means the outcome checker
+    already owns it). A standalone function is a few duplicated lines but
+    keeps the well-tested pod dedup path completely untouched.
+    """
+    try:
+        prs = await custom_api.list_namespaced_custom_object(
+            group="sre.yourdomain.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="patchrequests",
+            label_selector=f"target-node={node_name}",
+        )
+        for pr in prs.get("items", []):
+            status = pr.get("status", {}).get("approvalState", "Pending")
+            spec_error = pr.get("spec", {}).get("errorState", "")
+            if status in ("Pending", "Approved", "Applied") and spec_error == error_state:
+                pr_name = pr["metadata"]["name"]
+                logger.debug("[dedup-node] Active PR found: %s (status=%s)", pr_name, status)
+                return True, pr_name
+    except Exception as exc:
+        logger.warning("[dedup-node] API check failed (fail-open): %s", exc)
+    return False, None
+
+
 async def increment_seen_count(
     pr_name: str,
     namespace: str,
