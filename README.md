@@ -554,6 +554,7 @@ All operational documentation is in the [`/docs`](./docs) directory:
 | [simulation_guide_new_failure.md](./docs/simulation_guide_new_failure.md) | End-to-end simulation report of the shipping-service failure |
 | [end_to_end_simulation_guide.md](./docs/end_to_end_simulation_guide.md) | Step-by-step guide to reproduce any failure scenario |
 | [observability_implementation_guide.md](./docs/observability_implementation_guide.md) | How the full observability stack is wired |
+| [rag_semantic_cache.md](./docs/rag_semantic_cache.md) | Semantic memory (pgvector + local embeddings) that reuses past fixes instead of re-diagnosing — architecture + step-by-step commands to test it yourself |
 
 ---
 

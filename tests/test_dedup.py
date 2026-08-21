@@ -75,24 +75,31 @@ class TestLayer1Dampening:
         )
         assert result is True
 
-    def test_imagepullbackoff_respects_dampening(self):
-        """ImagePullBackOff is NOT in IMMEDIATE_TRIGGER_STATES and must be dampened."""
+    def test_imagepullbackoff_bypasses_dampening_immediately(self):
+        """ImagePullBackOff IS in IMMEDIATE_TRIGGER_STATES — pod is stuck and will
+        never generate a 2nd event, so dampening would permanently suppress it.
+        Bug fixed in feat/rag: moved ImagePullBackOff into IMMEDIATE_TRIGGER_STATES.
+        """
         result = asyncio.get_event_loop().run_until_complete(
             should_trigger("uid-img-001", "ImagePullBackOff")
         )
-        assert result is False
+        assert result is True
 
     def test_different_error_states_dont_share_count(self):
-        """Switching error state on the same pod UID resets the effective count."""
-        pod_uid = "uid-mixed-001"
-        # Two CrashLoopBackOff events
+        """Switching error state on the same pod UID resets the effective count
+        for dampened states. Uses ContainerCrashed (a dampened state) as the
+        second state since ImagePullBackOff is now in IMMEDIATE_TRIGGER_STATES.
+        """
+        pod_uid = "uid-mixed-002"
+        # Two CrashLoopBackOff events — but not yet at threshold (need 3)
         for _ in range(2):
             asyncio.get_event_loop().run_until_complete(
                 should_trigger(pod_uid, "CrashLoopBackOff")
             )
-        # Now switch to ImagePullBackOff — should NOT trigger (count = 1)
+        # Now fire a different dampened state — its own window starts at 1,
+        # so it should NOT cross the threshold of 3 yet.
         result = asyncio.get_event_loop().run_until_complete(
-            should_trigger(pod_uid, "ImagePullBackOff")
+            should_trigger(pod_uid, "ContainerCrashed")
         )
         assert result is False
 

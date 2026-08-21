@@ -33,6 +33,7 @@ _meter = None
 # ── Metric instruments (populated during setup_telemetry) ─────────────────────
 incidents_counter = None       # sre_agent_incidents_total
 dedup_hits_counter = None      # sre_agent_dedup_hits_total
+rag_hits_counter = None        # sre_agent_rag_hits_total
 llm_duration_histogram = None  # sre_agent_llm_duration_seconds
 llm_errors_counter = None      # sre_agent_llm_errors_total
 patchrequests_counter = None   # sre_agent_patchrequests_total
@@ -47,7 +48,7 @@ def setup_telemetry() -> None:
     Safe to call multiple times (idempotent via global flag).
     """
     global _tracer, _meter
-    global incidents_counter, dedup_hits_counter
+    global incidents_counter, dedup_hits_counter, rag_hits_counter
     global llm_duration_histogram, llm_errors_counter, patchrequests_counter
     global outcome_counter, mttr_histogram, mttd_histogram
 
@@ -98,6 +99,11 @@ def setup_telemetry() -> None:
         dedup_hits_counter = _meter.create_counter(
             name="sre_agent_dedup_hits_total",
             description="Number of events suppressed by each deduplication layer",
+            unit="1",
+        )
+        rag_hits_counter = _meter.create_counter(
+            name="sre_agent_rag_hits_total",
+            description="Incidents resolved by reusing a past patch (RAG match) instead of calling the LLM pipeline",
             unit="1",
         )
         llm_duration_histogram = _meter.create_histogram(

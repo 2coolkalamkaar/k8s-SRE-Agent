@@ -5,19 +5,24 @@ run_benchmarks.py — Rigorous end-to-end reliability benchmark for the K8s SRE 
 Phases:
     1. 3-Layer Dedup Pipeline  — Cost savings quantified over a 5-min crash window
     2. False Positive Rate     — Self-healing pods must NOT generate a PatchRequest
-    3. Detection Rate          — 5 distinct incident types across all severity classes
-    4. MTTR (Full Cycle)       — Fault injection → PatchRequest created + diagnosis quality check
-    5. Patch Executor          — Successful patch application rate
-    6. Rollback Safety Net     — Bad patch → automatic rollout undo latency
+    3. Detection Rate & MTTR   — 5 distinct incident types, each run BENCH_TRIALS times
+                                  (mean/median/stdev/min/max, not a single anecdote)
+    4. Patch Executor          — Successful patch application rate
+    5. Rollback Safety Net     — Bad patch → automatic rollout undo latency
+    6. RAG Semantic Cache      — Cold run (full AI pipeline) vs warm run (cache reuse):
+                                  latency delta, LLM calls saved, match correctness
 
 Output: Prints live results to terminal + saves docs/benchmark_results.md
+
+Configure trial count with: BENCH_TRIALS=3 python scripts/run_benchmarks.py
 """
 
-import subprocess, time, json, sys, os
+import subprocess, time, json, sys, os, statistics
 from datetime import datetime
 from textwrap import dedent
 
 NAMESPACE   = "production"
+TRIALS      = int(os.environ.get("BENCH_TRIALS", "3"))
 REPORT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../docs/benchmark_results.md")
 
 # ANSI colours
@@ -80,13 +85,23 @@ def count_prs(prefix=None):
     except Exception:
         return 0
 
-def get_pr_state(pr_name):
-    r = run(f"kubectl get pr {pr_name} -n production -o json", silent=True)
-    try:
-        body = json.loads(r.stdout)
-        return body.get("status", {}).get("approvalState", "")
-    except Exception:
-        return ""
+def psql(query, silent=True):
+    """Run a query against the sredb Postgres instance, return stdout."""
+    cmd = f'kubectl exec -n monitoring statefulset/postgres -- psql -U sreagent -d sredb -tAc "{query}"'
+    r = run(cmd, silent=silent)
+    return r.stdout.strip()
+
+def wait_for_worked(incident_id, timeout=150):
+    """Poll Postgres until outcome_checker marks this incident worked=true."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        val = psql(f"SELECT worked FROM incidents WHERE incident_id='{incident_id}';")
+        if val == "t":
+            return True, time.time() - t0
+        if val == "f":
+            return False, time.time() - t0
+        time.sleep(5)
+    return None, timeout
 
 def clean_up(names=None):
     info("Cleaning up test resources...")
@@ -94,7 +109,7 @@ def clean_up(names=None):
     targets = names or [
         "bench-dedup", "bench-selfheal",
         "bench-crash", "bench-oom", "bench-image", "bench-config", "bench-init",
-        "bench-appcrash", "bench-patchtest"
+        "bench-appcrash", "bench-patchtest", "bench-rag-oom",
     ]
     run(f"kubectl delete deployment {' '.join(targets)} -n production 2>/dev/null", silent=True)
     time.sleep(3)
@@ -134,10 +149,12 @@ def phase1_dedup():
     time.sleep(WINDOW)
 
     restarts = get_restart_count("bench-dedup")
-    pr, _ = get_pr_for("bench-dedup", timeout=5)
+    pr, _ = wait_for_pr("bench-dedup", timeout=5)
 
     if pr is None:
         fail("No PatchRequest created — dedup may have suppressed all events")
+        run("kubectl delete deployment bench-dedup -n production 2>/dev/null", silent=True)
+        run("kubectl delete pr --all -n production 2>/dev/null", silent=True)
         return {"restarts": restarts, "api_calls": 0, "pr_created": False, "savings_pct": 100.0}
 
     seen_count = pr.get("status", {}).get("seenCount", 1)
@@ -158,6 +175,13 @@ def phase1_dedup():
     else:
         fail(f"Phase 1 — Only {savings_pct:.1f}% savings ({restarts} restarts, {api_calls} calls)")
 
+    # Tear down immediately — this pod crash-loops forever and would otherwise
+    # keep spamming PatchRequests and competing for the LLM queue throughout
+    # every later phase.
+    run("kubectl delete deployment bench-dedup -n production 2>/dev/null", silent=True)
+    run("kubectl delete pr --all -n production 2>/dev/null", silent=True)
+    time.sleep(3)
+
     return {"restarts": restarts, "api_calls": api_calls, "pr_created": True, "savings_pct": savings_pct}
 
 
@@ -167,10 +191,8 @@ def phase1_dedup():
 
 def phase2_false_positives():
     hdr("PHASE 2: False Positive Rate")
-    info("Injecting a self-healing pod (crashes once, then succeeds)...")
+    info("Injecting a self-healing pod (stays up, never crashes)...")
 
-    # Pod crashes the first 2 times then writes a success marker — should not
-    # cross the dampening threshold before it self-heals.
     apply_manifest(dedent("""\
         apiVersion: apps/v1
         kind: Deployment
@@ -193,18 +215,22 @@ def phase2_false_positives():
 
     info("Watching for 60s — a stable pod should generate ZERO PatchRequests...")
     time.sleep(60)
-    
+
     prs = count_prs(prefix="bench-selfheal")
     if prs == 0:
         ok("Phase 2 PASS — zero false positives for stable pod (0 spurious PRs)")
     else:
         fail(f"Phase 2 FAIL — {prs} spurious PatchRequest(s) generated for healthy pod")
 
+    run("kubectl delete deployment bench-selfheal -n production 2>/dev/null", silent=True)
+    run("kubectl delete pr --all -n production 2>/dev/null", silent=True)
+    time.sleep(3)
+
     return {"false_positives": prs}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 3 & 4 — Detection Rate + MTTR across all complexity levels
+# PHASE 3 — Detection Rate + MTTR across all complexity levels (multi-trial)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 INCIDENTS = [
@@ -351,84 +377,93 @@ INCIDENTS = [
     },
 ]
 
-def phase3_4_detection_and_mttr():
-    hdr("PHASE 3+4: Detection Rate & MTTR across 5 Incident Types")
-    results = []
+def run_one_trial(inc, trial_num):
+    """Apply the manifest, wait for a PatchRequest, tear down, return one trial's result."""
+    run(f"kubectl delete pr --all -n production 2>/dev/null", silent=True)
+    run(f"kubectl delete deployment {inc['name']} -n production 2>/dev/null", silent=True)
+    time.sleep(2)
+
+    apply_manifest(inc["manifest"])
+    pr, mttr = wait_for_pr(inc["name"], timeout=180)
+
+    result = {"trial": trial_num, "detected": pr is not None, "mttr": None}
+    if pr is not None:
+        spec = pr.get("spec", {})
+        result.update({
+            "mttr":            mttr,
+            "actual_state":    spec.get("errorState", ""),
+            "state_correct":   spec.get("errorState", "") == inc["state"],
+            "severity":        spec.get("severity", ""),
+            "root_cause":      spec.get("rootCause", ""),
+            "proposed_patch":  spec.get("proposedPatch", {}),
+            "patch_valid":     bool(spec.get("proposedPatch", {}).get("spec")),
+        })
+
+    run(f"kubectl delete deployment {inc['name']} -n production 2>/dev/null", silent=True)
+    run("kubectl delete pr --all -n production 2>/dev/null", silent=True)
+    return result
+
+def phase3_detection_and_mttr():
+    hdr(f"PHASE 3: Detection Rate & MTTR — {TRIALS} trial(s) per incident type")
+    all_results = []
 
     for inc in INCIDENTS:
-        info(f"Injecting [{inc['complexity']}] {inc['type']}  ({inc['name']})...")
-        t0 = time.time()
-        apply_manifest(inc["manifest"])
-        pr, mttr = wait_for_pr(inc["name"], timeout=180)
+        info(f"[{inc['complexity']}] {inc['type']} ({inc['name']}) — running {TRIALS} trial(s)...")
+        trials = []
+        for t in range(1, TRIALS + 1):
+            r = run_one_trial(inc, t)
+            trials.append(r)
+            status = f"{r['mttr']:.1f}s" if r["detected"] else "TIMEOUT"
+            print(f"    trial {t}/{TRIALS}: {status}")
+            time.sleep(10)  # cooldown between trials
 
-        if pr is None:
-            fail(f"{inc['name']}: NOT DETECTED (timeout 180s)")
-            results.append({**inc, "detected": False, "mttr": None, "diagnosis_quality": None})
+        detected = [r for r in trials if r["detected"]]
+        mttrs = [r["mttr"] for r in detected]
+        summary = {
+            **inc,
+            "trials": trials,
+            "n_trials": TRIALS,
+            "n_detected": len(detected),
+            "detection_rate": len(detected) / TRIALS,
+            "mttr_mean":   statistics.mean(mttrs) if mttrs else None,
+            "mttr_median": statistics.median(mttrs) if mttrs else None,
+            "mttr_stdev":  statistics.stdev(mttrs) if len(mttrs) > 1 else 0.0,
+            "mttr_min":    min(mttrs) if mttrs else None,
+            "mttr_max":    max(mttrs) if mttrs else None,
+            "patch_valid_rate": (sum(1 for r in detected if r.get("patch_valid")) / len(detected)) if detected else None,
+            "sample_root_cause": next((r["root_cause"] for r in detected if r.get("root_cause")), ""),
+        }
+
+        if mttrs:
+            print(f"    → {len(detected)}/{TRIALS} detected | mean={summary['mttr_mean']:.1f}s "
+                  f"stdev={summary['mttr_stdev']:.1f}s min={summary['mttr_min']:.1f}s max={summary['mttr_max']:.1f}s")
+            ok(f"{inc['name']}: {len(detected)}/{TRIALS} detected")
         else:
-            # Check diagnosis quality
-            spec = pr.get("spec", {})
-            actual_state   = spec.get("errorState", "")
-            root_cause     = spec.get("rootCause", "")
-            severity       = spec.get("severity", "")
-            proposed_patch = spec.get("proposedPatch", {})
-            llm_diagnosis  = spec.get("llmDiagnosis", {})
-            likely_recurring = llm_diagnosis.get("likely_recurring", False)
-            patch_quality  = "✅ Valid" if proposed_patch.get("spec") else "⚠ Annotation-only"
+            fail(f"{inc['name']}: 0/{TRIALS} detected (all trials timed out)")
 
-            state_match    = "✅" if actual_state == inc["state"] else f"⚠ Got {actual_state}"
-            has_root_cause = "✅" if len(root_cause) > 20 else "⚠ Thin"
+        all_results.append(summary)
 
-            print(f"\n  ┌─ {inc['name']} [{inc['complexity']}] ─────────────────────────")
-            print(f"  │  Error State  : {state_match} ({actual_state})")
-            print(f"  │  MTTR         : {mttr:.1f}s (fault → PatchRequest)")
-            print(f"  │  Severity     : {severity}")
-            print(f"  │  Root Cause   : {has_root_cause} \"{root_cause[:80]}\"")
-            print(f"  │  Patch Quality: {patch_quality}")
-            print(f"  │  LLM Recurring: {likely_recurring}")
-            print(f"  └─────────────────────────────────────────────────────────")
+    total_detected = sum(r["n_detected"] for r in all_results)
+    total_trials = sum(r["n_trials"] for r in all_results)
+    print(f"\n  Overall Detection Rate: {total_detected}/{total_trials} "
+          f"({total_detected/total_trials*100:.0f}%)")
 
-            if mttr < 180:
-                ok(f"{inc['name']}: DETECTED in {mttr:.1f}s")
-            else:
-                fail(f"{inc['name']}: slow detection {mttr:.1f}s")
-
-            results.append({
-                **inc,
-                "detected":         True,
-                "mttr":             mttr,
-                "actual_state":     actual_state,
-                "state_correct":    actual_state == inc["state"],
-                "severity":         severity,
-                "root_cause":       root_cause,
-                "patch_quality":    patch_quality,
-                "proposed_patch":   proposed_patch,
-            })
-
-        # Cooldown between incidents to avoid LLM queue saturation
-        info("Cooling down 15s before next incident...")
-        time.sleep(15)
-
-    detected = sum(1 for r in results if r["detected"])
-    print(f"\n  Detection Rate: {detected}/{len(INCIDENTS)}  ({detected/len(INCIDENTS)*100:.0f}%)")
-    mttr_vals = [r["mttr"] for r in results if r["detected"] and r["mttr"]]
-    if mttr_vals:
-        print(f"  Avg MTTR      : {sum(mttr_vals)/len(mttr_vals):.1f}s   Min: {min(mttr_vals):.1f}s   Max: {max(mttr_vals):.1f}s")
-
-    return results
+    return all_results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 5 — Patch Executor + Rollback Safety
+# PHASE 4/5 — Patch Executor + Rollback Safety
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def phase5_patch_and_rollback(detection_results):
-    hdr("PHASE 5: Patch Executor & Rollback Safety")
-    
-    # Check how many of the detected incidents have a valid proposedPatch
-    patchable = [r for r in detection_results if r.get("proposed_patch", {}).get("spec")]
-    info(f"{len(patchable)}/{len(detection_results)} incidents received a spec-level patch (vs annotation-only)")
+def phase45_patch_and_rollback(detection_results):
+    hdr("PHASE 4+5: Patch Executor & Rollback Safety")
 
-    # Rollback test: create a healthy deployment, apply bad image, manually set PR to Applied
+    total_detected = sum(r["n_detected"] for r in detection_results)
+    total_patchable = sum(
+        sum(1 for t in r["trials"] if t.get("patch_valid")) for r in detection_results
+    )
+    info(f"{total_patchable}/{total_detected} detected trials received a spec-level patch (vs annotation-only)")
+
     info("Injecting rollback scenario: apply bad patch → wait for outcome_checker rollback...")
 
     apply_manifest(dedent("""\
@@ -449,12 +484,10 @@ def phase5_patch_and_rollback(detection_results):
               - name: app
                 image: nginx:stable
     """))
-    time.sleep(15)  # Wait for it to become healthy
+    time.sleep(15)
 
-    # Get exact timestamp
     applied_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Create the PR spec first
     run("""kubectl apply -f - <<'EOF'
 apiVersion: sre.yourdomain.io/v1alpha1
 kind: PatchRequest
@@ -478,13 +511,11 @@ spec:
 EOF""")
     time.sleep(2)
 
-    # Set status.approvalState=Applied via status subresource patch (required for subresource CRDs)
     run(f"""kubectl patch patchrequest bench-rollback-test -n production \
         --type=merge \
         --subresource=status \
         -p '{{"status":{{"approvalState":"Applied","appliedAt":"{applied_ts}","observationStartTime":"{applied_ts}"}}}}'""", silent=False)
 
-    # Apply the bad image to the deployment to simulate what patch executor does
     run("""kubectl patch deployment bench-patchtest -n production --type=strategic \
         -p '{"spec":{"template":{"spec":{"containers":[{"name":"app","image":"nginx:this-image-does-not-exist-bad-patch"}]}}}}'""", silent=False)
 
@@ -514,39 +545,187 @@ EOF""")
             rollback_triggered = True
             rollback_latency = 120.0
         else:
-            fail(f"Rollback not confirmed. Check OUTCOME_OBSERVATION_WINDOW env var (may be too long for this test).")
-            info("Hint: Set OUTCOME_OBSERVATION_WINDOW=60 in controller-deployment.yaml for faster rollback in tests.")
+            fail("Rollback not confirmed. Check OUTCOME_OBSERVATION_WINDOW env var (may be too long for this test).")
 
-    return {"patchable_incidents": len(patchable), "rollback_triggered": rollback_triggered,
-            "rollback_latency": rollback_latency}
+    run("kubectl delete deployment bench-patchtest -n production 2>/dev/null", silent=True)
+    run("kubectl delete pr bench-rollback-test -n production 2>/dev/null", silent=True)
+
+    return {"patchable": total_patchable, "detected": total_detected,
+            "rollback_triggered": rollback_triggered, "rollback_latency": rollback_latency}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 6 — RAG Semantic Cache: cold vs warm run
+# ═══════════════════════════════════════════════════════════════════════════════
+
+RAG_MANIFEST = dedent("""\
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: bench-rag-oom
+      namespace: production
+    spec:
+      replicas: 1
+      selector:
+        matchLabels: {app: bench-rag-oom}
+      template:
+        metadata:
+          labels: {app: bench-rag-oom}
+        spec:
+          containers:
+            - name: app
+              image: python:3.11-alpine
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import time
+                  buf = bytearray(128 * 1024 * 1024)
+                  time.sleep(3600)
+              resources:
+                limits: {cpu: "100m", memory: "32Mi"}
+""")
+
+def phase6_rag_cache():
+    hdr("PHASE 6: RAG Semantic Cache — Cold vs Warm Run")
+
+    # Clean slate: remove any prior bench-rag-oom incidents from Postgres so this
+    # phase measures a genuine cold start, not a leftover match from an earlier run.
+    run("kubectl delete deployment bench-rag-oom -n production 2>/dev/null", silent=True)
+    run("kubectl delete pr -n production --all 2>/dev/null", silent=True)
+    psql("DELETE FROM incidents WHERE target_deployment='bench-rag-oom';")
+    time.sleep(2)
+
+    # ── Trial A: cold run — no memory yet, must call the full AI pipeline ──────
+    info("Trial A (cold): first-ever OOM on this deployment — expect full AI pipeline...")
+    apply_manifest(RAG_MANIFEST)
+    pr_cold, mttr_cold = wait_for_pr("bench-rag-oom", timeout=120)
+
+    if pr_cold is None:
+        fail("Cold trial: no PatchRequest created — aborting Phase 6")
+        run("kubectl delete deployment bench-rag-oom -n production 2>/dev/null", silent=True)
+        return {"ran": False}
+
+    incident_id_cold = pr_cold["spec"]["incidentId"]
+    source_cold = pr_cold["metadata"]["labels"].get("source", "?")
+    pr_name_cold = pr_cold["metadata"]["name"]
+    print(f"    cold MTTR: {mttr_cold:.1f}s | source={source_cold}")
+
+    # Approve it and wait for the outcome checker to confirm it actually worked —
+    # RAG will only ever reuse patches with worked=true.
+    info("Approving the cold-run patch and waiting for outcome_checker to confirm success...")
+    run(f"""kubectl patch pr {pr_name_cold} -n production \
+        --subresource=status --type=merge \
+        -p '{{"status":{{"approvalState":"Approved","approvedBy":"benchmark@sre-agent"}}}}'""")
+
+    worked, wait_elapsed = wait_for_worked(incident_id_cold, timeout=150)
+    if worked is not True:
+        fail(f"Cold-run patch never confirmed healthy (worked={worked}) — cannot test cache reuse")
+        run("kubectl delete deployment bench-rag-oom -n production 2>/dev/null", silent=True)
+        run("kubectl delete pr -n production --all 2>/dev/null", silent=True)
+        return {"ran": False}
+    ok(f"Cold-run patch confirmed healthy after {wait_elapsed:.0f}s — now eligible for RAG reuse")
+
+    # ── Trial B: warm run — same failure, should hit the semantic cache ────────
+    run("kubectl delete deployment bench-rag-oom -n production 2>/dev/null", silent=True)
+    run("kubectl delete pr -n production --all 2>/dev/null", silent=True)
+    time.sleep(3)
+
+    info("Trial B (warm): re-triggering the identical failure — expect a RAG cache hit...")
+    apply_manifest(RAG_MANIFEST)
+    pr_warm, mttr_warm = wait_for_pr("bench-rag-oom", timeout=60)
+
+    run("kubectl delete deployment bench-rag-oom -n production 2>/dev/null", silent=True)
+
+    if pr_warm is None:
+        fail("Warm trial: no PatchRequest created")
+        run("kubectl delete pr -n production --all 2>/dev/null", silent=True)
+        return {"ran": True, "cache_hit": False, "mttr_cold": mttr_cold}
+
+    source_warm = pr_warm["metadata"]["labels"].get("source", "?")
+    matches = pr_warm["spec"].get("llmDiagnosis", {}).get("matches_past_incident")
+    similarity = None
+    sim_str = psql(
+        f"SELECT round((1 - (a.embedding <=> b.embedding))::numeric, 4) "
+        f"FROM incidents a, incidents b "
+        f"WHERE a.incident_id='{incident_id_cold}' "
+        f"AND b.incident_id=(SELECT incident_id FROM incidents WHERE target_deployment='bench-rag-oom' "
+        f"AND incident_id != '{incident_id_cold}' ORDER BY opened_at DESC LIMIT 1);"
+    )
+    try:
+        similarity = float(sim_str)
+    except ValueError:
+        pass
+
+    cache_hit = source_warm == "rag_cache"
+    print(f"    warm MTTR: {mttr_warm:.1f}s | source={source_warm} | matches_past_incident={matches} | similarity={similarity}")
+
+    speedup = (mttr_cold / mttr_warm) if (mttr_warm and mttr_warm > 0) else None
+
+    if cache_hit:
+        ok(f"Phase 6 PASS — RAG cache hit. {mttr_cold:.1f}s → {mttr_warm:.1f}s "
+           f"({speedup:.1f}x faster, 0 LLM calls on the warm run)")
+    else:
+        fail(f"Phase 6 — expected a RAG cache hit but got source={source_warm}")
+
+    run("kubectl delete pr -n production --all 2>/dev/null", silent=True)
+
+    return {
+        "ran": True, "cache_hit": cache_hit,
+        "mttr_cold": mttr_cold, "mttr_warm": mttr_warm, "speedup": speedup,
+        "similarity": similarity, "matches_past_incident": matches,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # REPORT GENERATOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate_report(dedup, fp, detection, patch):
+def generate_report(dedup, fp, detection, patch, rag):
     hdr("Generating Benchmark Report")
 
-    detected_count = sum(1 for r in detection if r["detected"])
-    mttr_vals      = [r["mttr"] for r in detection if r.get("detected") and r.get("mttr")]
-    avg_mttr       = sum(mttr_vals) / len(mttr_vals) if mttr_vals else 0
+    total_detected = sum(r["n_detected"] for r in detection)
+    total_trials   = sum(r["n_trials"] for r in detection)
+    all_mttrs = [t["mttr"] for r in detection for t in r["trials"] if t.get("detected")]
+    avg_mttr = statistics.mean(all_mttrs) if all_mttrs else 0
 
     rows = ""
     for r in detection:
-        if r["detected"]:
-            rows += (f"| **{r['complexity']}** | {r['type']} | `{r.get('actual_state','?')}` "
-                     f"| {r['severity']} | {r['mttr']:.1f}s "
-                     f"| {'✅ Valid spec' if r.get('proposed_patch',{}).get('spec') else '⚠ Annotation'} "
-                     f"| ✅ Pass |\n")
+        if r["n_detected"] > 0:
+            rows += (f"| **{r['complexity']}** | {r['type']} | {r['n_detected']}/{r['n_trials']} "
+                     f"| {r['mttr_mean']:.1f}s | {r['mttr_stdev']:.1f}s "
+                     f"| {r['mttr_min']:.1f}s–{r['mttr_max']:.1f}s "
+                     f"| {r['patch_valid_rate']*100:.0f}% |\n")
         else:
-            rows += f"| **{r['complexity']}** | {r['type']} | — | — | Timeout | — | ❌ Fail |\n"
+            rows += f"| **{r['complexity']}** | {r['type']} | 0/{r['n_trials']} | — | — | — | — |\n"
 
     rollback_str = (f"{patch['rollback_latency']:.0f}s" if patch.get("rollback_latency")
                     else "Not triggered")
 
+    if rag.get("ran") and rag.get("cache_hit"):
+        rag_section = f"""
+| Metric | Value |
+|--------|-------|
+| Cold-run MTTR (full AI pipeline) | **{rag['mttr_cold']:.1f}s** |
+| Warm-run MTTR (RAG cache hit) | **{rag['mttr_warm']:.1f}s** |
+| Speedup | **{rag['speedup']:.1f}x** |
+| LLM calls on warm run | **0** (Analyst + Fixer both skipped) |
+| Semantic similarity (cold vs. warm log embedding) | **{rag['similarity']}** |
+| Reused incident traced via `matches_past_incident` | `{rag['matches_past_incident']}` |
+
+> The warm run only ever reuses a patch that a prior `outcome_checker` cycle confirmed
+> healthy (`worked = true`), and still dry-run validates it with `ValidatorAgent` before
+> creating a PatchRequest — this is a cache with a safety check, not blind replay.
+"""
+        rag_kpi = f"✅ {rag['speedup']:.1f}x faster, 0 LLM calls"
+    elif rag.get("ran"):
+        rag_section = "\n⚠ Cold run succeeded but the warm run did not hit the semantic cache — see logs.\n"
+        rag_kpi = "⚠ Cache miss on warm run"
+    else:
+        rag_section = "\n⚠ Phase did not complete — see terminal output for the failure point.\n"
+        rag_kpi = "⚠ Not confirmed"
+
     report = f"""# SRE Agent — Automated Capability Benchmark
-*Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Cluster: kind (sre-agent-cluster)*
+*Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Cluster: kind (sre-agent-cluster) | Trials per incident type: {TRIALS}*
 
 ---
 
@@ -554,11 +733,12 @@ def generate_report(dedup, fp, detection, patch):
 
 | KPI | Result |
 |-----|--------|
-| Overall Detection Rate | **{detected_count}/{len(detection)} incident types ({detected_count/len(detection)*100:.0f}%)** |
-| Average MTTR (fault → patch) | **{avg_mttr:.1f}s** |
+| Overall Detection Rate | **{total_detected}/{total_trials} trials ({total_detected/total_trials*100:.0f}%)** |
+| Average MTTR (fault → patch) | **{avg_mttr:.1f}s** (stdev across all trials: {statistics.stdev(all_mttrs) if len(all_mttrs) > 1 else 0:.1f}s) |
 | False Positive Rate | **{fp['false_positives']}/1 ({100 if fp['false_positives']==0 else 0}% precision)** |
 | API Cost Savings (dedup, 5 min) | **{dedup['savings_pct']:.1f}%** |
 | Rollback Safety Net | **{'✅ Triggered in ' + rollback_str if patch['rollback_triggered'] else '⚠ Not confirmed'}** |
+| RAG Semantic Cache | **{rag_kpi}** |
 
 ---
 
@@ -595,25 +775,26 @@ The system must NOT generate a spurious PatchRequest.
 
 ---
 
-## Phase 3 & 4 — Detection Rate & MTTR
+## Phase 3 — Detection Rate & MTTR ({TRIALS} trials per incident type)
 
-**Scenario:** 5 distinct real-world infrastructure incident types injected sequentially.
-MTTR is measured from the moment the fault manifests to when a complete `PatchRequest` (with
-a root cause and proposed patch) is written to the cluster.
+**Scenario:** 5 distinct real-world infrastructure incident types, each injected **{TRIALS} times
+independently** (fresh deployment per trial). MTTR is measured from fault injection to a
+complete `PatchRequest` (root cause + proposed patch) landing in the cluster. Reporting mean,
+standard deviation, and range instead of a single anecdotal run.
 
-| Complexity | Incident Type | Error State | Severity | MTTR | Patch | Result |
-|------------|---------------|-------------|----------|------|-------|--------|
+| Complexity | Incident Type | Detected | Mean MTTR | StdDev | Range | Valid Patch Rate |
+|------------|---------------|----------|-----------|--------|-------|-------------------|
 {rows}
 
-**Detection Rate: {detected_count}/{len(detection)} ({detected_count/len(detection)*100:.0f}%)**
-**Average MTTR: {avg_mttr:.1f}s**
+**Overall Detection Rate: {total_detected}/{total_trials} ({total_detected/total_trials*100:.0f}%)**
+**Overall Mean MTTR: {avg_mttr:.1f}s**
 
 ---
 
-## Phase 5 — Patch Executor & Rollback Safety
+## Phase 4/5 — Patch Executor & Rollback Safety
 
 **Scenario A — Patch Quality:**
-{patch['patchable_incidents']}/{len(detection)} detected incidents received a `spec`-level
+{patch['patchable']}/{patch['detected']} detected trials received a `spec`-level
 patch (modifying the actual deployment spec). The remaining received annotation-only patches
 with remediation guidance for human review.
 
@@ -633,16 +814,27 @@ configurable observation window.
 
 ---
 
+## Phase 6 — RAG Semantic Cache (Cold vs. Warm Run)
+
+**Scenario:** The same OOM failure is triggered twice on a fresh deployment. The first
+(cold) run has no memory to draw on and must run the full 3-agent pipeline. After that
+patch is applied and confirmed healthy, the identical failure is triggered again (warm run) —
+this should be recognized as the same problem and reuse the prior fix instead of re-diagnosing.
+{rag_section}
+---
+
 ## Methodology
 
 - **Cluster:** 3-node `kind` (Kubernetes in Docker) cluster — `sre-agent-cluster`
 - **Controller:** `kopf` Python operator, `sre-controller` Deployment in `monitoring` namespace
-- **LLM:** Vertex AI (Gemini) accessed via the dual-provider `llm_client.py`
-- **Observation Window:** `OUTCOME_OBSERVATION_WINDOW=600s` (10 minutes for production, 30s timer)
+- **LLM:** Vertex AI (Gemini 2.5 Flash) via `llm_client.py`
+- **RAG:** Local `fastembed` embeddings (`BAAI/bge-small-en-v1.5`) + `pgvector` on the in-cluster Postgres
+- **Observation Window:** `OUTCOME_OBSERVATION_WINDOW=60s` for this benchmark run (600s in a real deployment)
+- **Trials per incident type:** {TRIALS} (set via `BENCH_TRIALS` env var)
 - **All tests run sequentially in the `production` namespace**
 - **Script:** `scripts/run_benchmarks.py` — fully automated, repeatable, no manual steps
 
-*Run again with: `python scripts/run_benchmarks.py`*
+*Run again with: `BENCH_TRIALS={TRIALS} python scripts/run_benchmarks.py`*
 """
 
     os.makedirs(os.path.dirname(REPORT_PATH), exist_ok=True)
@@ -652,11 +844,12 @@ configurable observation window.
     ok(f"Report saved → {REPORT_PATH}")
     print(f"\n{BOLD}{'═'*60}")
     print(f"  FINAL SCORE")
-    print(f"  Detection Rate : {detected_count}/{len(detection)} ({detected_count/len(detection)*100:.0f}%)")
+    print(f"  Detection Rate : {total_detected}/{total_trials} ({total_detected/total_trials*100:.0f}%)")
     print(f"  Avg MTTR       : {avg_mttr:.1f}s")
     print(f"  API Savings    : {dedup['savings_pct']:.1f}%")
     print(f"  False Positives: {fp['false_positives']}")
     print(f"  Rollback       : {'✅ ' + rollback_str if patch['rollback_triggered'] else '⚠ Not confirmed'}")
+    print(f"  RAG Cache      : {rag_kpi}")
     print(f"{'═'*60}{RESET}")
 
 
@@ -666,16 +859,17 @@ configurable observation window.
 
 if __name__ == "__main__":
     print(f"\n{BOLD}K8s SRE Agent — Automated Capability Benchmark{RESET}")
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Trials per incident: {TRIALS}\n")
 
     clean_up()
 
     dedup_res     = phase1_dedup()
     fp_res        = phase2_false_positives()
-    detection_res = phase3_4_detection_and_mttr()
-    patch_res     = phase5_patch_and_rollback(detection_res)
+    detection_res = phase3_detection_and_mttr()
+    patch_res     = phase45_patch_and_rollback(detection_res)
+    rag_res       = phase6_rag_cache()
 
-    generate_report(dedup_res, fp_res, detection_res, patch_res)
+    generate_report(dedup_res, fp_res, detection_res, patch_res, rag_res)
 
     clean_up()
     print(f"\n{GREEN}{BOLD}Benchmark complete!{RESET}")

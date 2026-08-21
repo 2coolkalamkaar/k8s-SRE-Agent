@@ -43,19 +43,22 @@ from kubernetes_asyncio import client as k8s_client, config as k8s_config
 from controller.dedup import (
     check_fingerprint_cache,
     clear_dampening,
+    clear_fingerprint,
     has_open_patchrequest,
     increment_seen_count,
     register_fingerprint,
     should_trigger,
 )
 from controller.incident import Incident
+import controller.db as db
+import controller.embeddings as embeddings
 from controller.log_preprocessor import (
     detect_error_state,
     detect_init_error_state,
     make_fingerprint,
     preprocess_logs,
 )
-from controller.llm_client import diagnose_incident
+from controller.llm_client import diagnose_incident, ValidatorAgent
 import controller.telemetry as telemetry
 import controller.webhook_client as webhook_client
 import controller.outcome_checker  # noqa: F401 (Ensure kopf discovers the timer)
@@ -205,6 +208,7 @@ async def _create_patch_request_crd(
             "labels": {
                 "target-deployment": deployment_name,
                 "incident-id": incident_id,
+                "source": diagnosis.get("source", "ai_pipeline"),
             },
         },
         "spec": {
@@ -289,6 +293,8 @@ async def on_startup(logger: logging.Logger, **kwargs):
     """Initialise telemetry (OTEL traces → Tempo, metrics → Prometheus)."""
     telemetry.setup_telemetry()
     logger.info("✅ Telemetry initialised — traces → Tempo, metrics → Prometheus :9090")
+    await db.init_db_pool()
+    embeddings.init_embedding_model()
 
 
 # @kopf.on.startup()
@@ -479,8 +485,14 @@ async def _run_diagnosis_pipeline(
                 )
                 if telemetry.dedup_hits_counter:
                     telemetry.dedup_hits_counter.add(1, {"layer": "l2_fingerprint", "namespace": namespace})
-                await increment_seen_count(existing_pr, namespace, custom_api)
-                return
+                still_exists = await increment_seen_count(existing_pr, namespace, custom_api)
+                if still_exists:
+                    return
+                # Cached fingerprint pointed at a PatchRequest that's gone (approved,
+                # closed, or manually deleted) — purge the stale entry and fall
+                # through so this recurrence is actually diagnosed instead of
+                # silently dropped.
+                await clear_fingerprint(fingerprint)
 
             # ── Layer 3: Active PatchRequest check ────────────────────────────
             with telemetry_tracer.start_as_current_span("sre.dedup.l3_pr_check",
@@ -495,8 +507,11 @@ async def _run_diagnosis_pipeline(
                 )
                 if telemetry.dedup_hits_counter:
                     telemetry.dedup_hits_counter.add(1, {"layer": "l3_pr_check", "namespace": namespace})
-                await increment_seen_count(existing_pr, namespace, custom_api)
-                return
+                still_exists = await increment_seen_count(existing_pr, namespace, custom_api)
+                if still_exists:
+                    return
+                # Rare race: the PR was deleted between the has_open_patchrequest
+                # check above and this increment — fall through and diagnose fresh.
 
             # ── All 3 layers passed → call LLM ────────────────────────────────
             incident_id = _make_incident_id()
@@ -527,13 +542,59 @@ async def _run_diagnosis_pipeline(
             except Exception as mttd_exc:
                 logger.debug("[%s] Could not record MTTD: %s", incident_id, mttd_exc)
 
-            diagnosis = await diagnose_incident(
-                pod_context=pod_context,
-                deployment_spec=deployment_spec,
-                cleaned_logs=cleaned_logs,
-                events=events_text,
-                incident_id=incident_id,
-            )
+            # ── RAG: embed cleaned logs so this incident can be reused later ───
+            with telemetry_tracer.start_as_current_span("sre.rag.embed_logs") as _:
+                try:
+                    embedding_vec = await embeddings.embed_text(cleaned_logs)
+                except Exception as embed_exc:
+                    logger.warning("[%s] Embedding failed (non-fatal): %s", incident_id, embed_exc)
+                    embedding_vec = None
+
+            # ── RAG: reuse a past fix instead of calling the AI pipeline ────────
+            diagnosis = None
+            with telemetry_tracer.start_as_current_span("sre.rag.lookup") as rag_span:
+                rag_match = await db.find_similar_incident(embedding_vec, error_state) if embedding_vec else None
+                rag_span.set_attribute("rag.hit", bool(rag_match))
+                if rag_match:
+                    logger.info(
+                        "[%s] 🧠 RAG match: %s (similarity=%.3f) — reusing its patch instead of calling the AI agents",
+                        incident_id, rag_match["incident_id"], rag_match["similarity"],
+                    )
+                    is_valid, validation_err = await ValidatorAgent.validate(
+                        namespace, deployment_name, rag_match["patch_applied"]
+                    )
+                    if is_valid:
+                        diagnosis = {
+                            "root_cause": rag_match["root_cause"],
+                            "severity": rag_match["severity"],
+                            "suggested_fix": f"Reused from {rag_match['incident_id']} "
+                                             f"(semantic match, similarity={rag_match['similarity']:.2f})",
+                            "auto_restart_safe": True,
+                            "config_suggestions": [],
+                            "likely_recurring": True,
+                            "estimated_impact": "See original incident " + rag_match["incident_id"],
+                            "matches_past_incident": rag_match["incident_id"],
+                            "confidence_boost": "high",
+                            "proposed_patch": rag_match["patch_applied"],
+                            "source": "rag_cache",
+                        }
+                        if telemetry.rag_hits_counter:
+                            telemetry.rag_hits_counter.add(1, {"namespace": namespace, "error_state": error_state})
+                    else:
+                        logger.warning(
+                            "[%s] RAG match found but its patch no longer validates (%s) — falling back to AI pipeline",
+                            incident_id, validation_err,
+                        )
+
+            if diagnosis is None:
+                diagnosis = await diagnose_incident(
+                    pod_context=pod_context,
+                    deployment_spec=deployment_spec,
+                    cleaned_logs=cleaned_logs,
+                    events=events_text,
+                    incident_id=incident_id,
+                )
+                diagnosis["source"] = "ai_pipeline"
             diagnosis["error_state"] = error_state
 
             # ── Build Incident domain object ──────────────────────────────────
@@ -552,6 +613,7 @@ async def _run_diagnosis_pipeline(
                     namespace, deployment_name, incident_id, diagnosis, custom_api
                 )
             await _create_incident_record_crd(incident, custom_api)
+            await db.save_incident(incident, embedding=embedding_vec)
 
             # Increment patchrequest counter
             if telemetry.patchrequests_counter:
@@ -569,7 +631,7 @@ async def _run_diagnosis_pipeline(
             # ── Notify via Webhook (Discord / webhook.site) ────────────────────
             severity = diagnosis.get("severity", "unknown")
             root_cause = diagnosis.get("root_cause", "Unknown")
-            patch_preview = str(proposed_patch.get("spec", "Annotation-only patch"))
+            patch_preview = str(diagnosis.get("proposed_patch", {}).get("spec", "Annotation-only patch"))
             
             # Fire and forget async webhook alert
             import asyncio
@@ -705,6 +767,10 @@ async def on_patchrequest_approved(body, name, namespace, new, old, logger, **kw
         )
         logger.info("[%s] Deployment %s/%s patched successfully", name, target_namespace, deployment_name)
 
+        # ── Persist the applied patch so RAG can reuse it on future incidents ──
+        incident_id = spec.get("incidentId")
+        if incident_id and proposed_patch:
+            await db.save_applied_patch(incident_id, proposed_patch, approved_by)
 
         # ── Update PatchRequest status → Applied + start observation ──────
         now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()

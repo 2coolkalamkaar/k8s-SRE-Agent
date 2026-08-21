@@ -153,10 +153,14 @@ async def increment_seen_count(
     pr_name: str,
     namespace: str,
     custom_api,
-) -> None:
+) -> bool:
     """
     Bump seenCount on an existing PatchRequest rather than creating a duplicate.
     Fires escalation Slack nudges at milestones 10, 25, 50.
+
+    Returns False if the target PatchRequest no longer exists (e.g. it was
+    already approved/closed/deleted) — the caller should then treat this as
+    a fresh incident instead of silently dropping the event.
     """
     try:
         current = await custom_api.get_namespaced_custom_object(
@@ -180,5 +184,14 @@ async def increment_seen_count(
             logger.warning(
                 "[ESCALATION] %s has been seen %d times and is still unresolved!", pr_name, seen
             )
+        return True
     except Exception as exc:
-        logger.warning("[dedup-L3] Failed to increment seenCount on %s: %s", pr_name, exc)
+        status = getattr(exc, "status", None)
+        if status == 404:
+            logger.warning(
+                "[dedup] Target PatchRequest %s no longer exists — cached fingerprint was stale, "
+                "treating this as a fresh incident", pr_name,
+            )
+        else:
+            logger.warning("[dedup] Failed to increment seenCount on %s: %s", pr_name, exc)
+        return False

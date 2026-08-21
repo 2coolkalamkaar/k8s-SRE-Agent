@@ -13,6 +13,7 @@ import kopf
 from kubernetes_asyncio import client as k8s_client, config as k8s_config
 
 import controller.telemetry as telemetry
+import controller.db as db
 from controller.dedup import clear_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ async def _check_deployment_health(deployment_name: str, namespace: str) -> tupl
         await apps_api.api_client.close()
 
 
-async def _execute_rollback(deployment_name: str, target_namespace: str, pr_name: str, namespace: str, crash_reason: str, fingerprint: str) -> None:
+async def _execute_rollback(deployment_name: str, target_namespace: str, pr_name: str, namespace: str, crash_reason: str, fingerprint: str, incident_id: str | None = None) -> None:
     await _ensure_k8s_configured()
     apps_api = k8s_client.AppsV1Api()
     custom_api = k8s_client.CustomObjectsApi()
@@ -95,7 +96,9 @@ async def _execute_rollback(deployment_name: str, target_namespace: str, pr_name
         
         if telemetry.outcome_counter:
             telemetry.outcome_counter.add(1, {"outcome": "rollback"})
-            
+        if incident_id:
+            await db.mark_incident_outcome(incident_id, worked=False)
+
     except Exception as exc:
         logger.error("[outcome] Rollback failed for %s: %s", pr_name, exc)
     finally:
@@ -136,6 +139,8 @@ async def _close_incident(body: dict, pr_name: str, namespace: str, elapsed: flo
             telemetry.outcome_counter.add(1, {"outcome": "success"})
         if telemetry.mttr_histogram:
             telemetry.mttr_histogram.record(elapsed)
+        if incident_id:
+            await db.mark_incident_outcome(incident_id, worked=True, mttr_seconds=int(elapsed))
             
     except Exception as exc:
         logger.error("[outcome] Failed to close incident %s: %s", pr_name, exc)
@@ -189,7 +194,8 @@ async def outcome_checker_timer(body, name, namespace, logger, **kwargs):
 
     if not is_healthy:
         logger.warning("[outcome] 🔴 %s: pod crashed again after patch — triggering rollback! Reason: %s", name, crash_reason)
-        await _execute_rollback(deployment_name, target_namespace, name, namespace, crash_reason, fingerprint)
+        incident_id = spec.get("incidentId")
+        await _execute_rollback(deployment_name, target_namespace, name, namespace, crash_reason, fingerprint, incident_id)
         return
 
     if elapsed >= OBSERVATION_WINDOW_SECONDS:
