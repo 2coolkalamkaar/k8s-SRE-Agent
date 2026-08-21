@@ -76,12 +76,26 @@ data:
         recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id              SERIAL PRIMARY KEY,
+        entry_hash      VARCHAR(64) UNIQUE NOT NULL,
+        prev_hash       VARCHAR(64) NOT NULL,
+        incident_id     VARCHAR(20),
+        action_type     VARCHAR(50) NOT NULL,
+        actor           VARCHAR(100) NOT NULL,
+        reason          TEXT,
+        payload         JSONB,
+        recorded_at     TIMESTAMPTZ NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_incidents_state ON incidents(state);
     CREATE INDEX IF NOT EXISTS idx_incidents_opened_at ON incidents(opened_at);
     CREATE INDEX IF NOT EXISTS idx_incidents_deployment ON incidents(target_deployment);
     CREATE INDEX IF NOT EXISTS idx_incidents_error ON incidents(error_state);
     CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint ON incidents(error_fingerprint);
     CREATE INDEX IF NOT EXISTS idx_transitions_incident ON state_transitions(incident_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_incident ON audit_log(incident_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_recorded_at ON audit_log(recorded_at);
 ---
 apiVersion: v1
 kind: Service

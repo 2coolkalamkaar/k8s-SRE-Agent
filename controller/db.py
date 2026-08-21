@@ -55,6 +55,13 @@ def _get_pool() -> Optional[asyncpg.Pool]:
     return _pool
 
 
+def get_pool() -> Optional[asyncpg.Pool]:
+    """Public accessor for other modules (e.g. controller/audit.py) that
+    need direct pool access rather than one of this module's higher-level
+    save/query helpers."""
+    return _get_pool()
+
+
 async def save_incident(incident, embedding: list[float] | None = None) -> None:
     """Upsert an incident row from an Incident domain object (incident.to_dict())."""
     pool = _get_pool()

@@ -85,6 +85,8 @@ spec:
               containerPort: 8080
             - name: metrics
               containerPort: 9090
+            - name: webhook
+              containerPort: 8090
           livenessProbe:
             httpGet:
               path: /healthz
@@ -119,3 +121,6 @@ spec:
     - name: metrics
       port: 9090
       targetPort: 9090
+    - name: webhook
+      port: 8090
+      targetPort: 8090

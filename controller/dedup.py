@@ -184,6 +184,35 @@ async def has_open_patchrequest_for_node(
     return False, None
 
 
+async def has_open_patchrequest_for_quota(
+    namespace: str,
+    quota_name: str,
+    error_state: str,
+    custom_api,
+) -> tuple[bool, str | None]:
+    """Cluster-domain (ResourceQuota) counterpart. Unlike nodes, a
+    ResourceQuota IS namespaced, so this checks within the quota's own
+    namespace rather than a shared cluster-incidents namespace."""
+    try:
+        prs = await custom_api.list_namespaced_custom_object(
+            group="sre.yourdomain.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="patchrequests",
+            label_selector=f"target-quota={quota_name}",
+        )
+        for pr in prs.get("items", []):
+            status = pr.get("status", {}).get("approvalState", "Pending")
+            spec_error = pr.get("spec", {}).get("errorState", "")
+            if status in ("Pending", "Approved", "Applied") and spec_error == error_state:
+                pr_name = pr["metadata"]["name"]
+                logger.debug("[dedup-cluster] Active PR found: %s (status=%s)", pr_name, status)
+                return True, pr_name
+    except Exception as exc:
+        logger.warning("[dedup-cluster] API check failed (fail-open): %s", exc)
+    return False, None
+
+
 async def increment_seen_count(
     pr_name: str,
     namespace: str,

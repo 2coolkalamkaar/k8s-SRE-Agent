@@ -190,6 +190,63 @@ def detect_node_condition(conditions: list[dict]) -> str | None:
     return None
 
 
+# Kubernetes resource quantity suffixes, mapped to a multiplier that converts
+# them to a common base unit so "500m" and "1" (for the same resource key)
+# can be compared correctly. Binary (Ki/Mi/Gi/...) and decimal SI (m/k/M/...)
+# suffixes are both used by the API depending on the resource type.
+_QUANTITY_SUFFIXES = {
+    "n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1,
+    "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18,
+    "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50, "Ei": 2**60,
+}
+
+
+def _parse_k8s_quantity(qty: str) -> float:
+    """Parse a Kubernetes resource quantity string (e.g. '500m', '2Gi', '10')
+    into a plain float in a consistent base unit. Returns 0.0 on anything
+    unparseable rather than raising — a quota check that can't parse a
+    value should skip it, not crash the whole watcher."""
+    match = re.match(r"^([0-9.eE+-]+)([a-zA-Z]*)$", (qty or "").strip())
+    if not match:
+        return 0.0
+    number, suffix = match.groups()
+    try:
+        return float(number) * _QUANTITY_SUFFIXES.get(suffix, 1)
+    except ValueError:
+        return 0.0
+
+
+def detect_quota_pressure(used: dict, hard: dict, near_limit_ratio: float = 0.9) -> str | None:
+    """
+    Compare a ResourceQuota's status.used against status.hard for every
+    tracked resource. Returns 'ResourceQuotaExceeded' if any resource is at
+    or over its limit, 'ResourceQuotaNearLimit' if any is within
+    near_limit_ratio of it (early warning, before anything actually starts
+    failing to schedule), else None.
+    """
+    exceeded = False
+    near_limit = False
+    for key, hard_val in (hard or {}).items():
+        used_val = used.get(key)
+        if used_val is None:
+            continue
+        hard_qty = _parse_k8s_quantity(hard_val)
+        used_qty = _parse_k8s_quantity(used_val)
+        if hard_qty <= 0:
+            continue
+        ratio = used_qty / hard_qty
+        if ratio >= 1.0:
+            exceeded = True
+        elif ratio >= near_limit_ratio:
+            near_limit = True
+
+    if exceeded:
+        return "ResourceQuotaExceeded"
+    if near_limit:
+        return "ResourceQuotaNearLimit"
+    return None
+
+
 def detect_init_error_state(init_container_statuses: list[dict]) -> str | None:
     """
     Parse Kubernetes initContainerStatuses and return a canonical error state

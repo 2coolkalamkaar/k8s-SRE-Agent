@@ -45,6 +45,13 @@ rules:
   - apiGroups: [""]
     resources: [pods/eviction]
     verbs: [create]
+  # ResourceQuota visibility + patch — Cluster domain (Phase 3). Same
+  # observer-holds-executor-verbs situation as nodes above: `patch` covers
+  # both kopf's own bookkeeping and the actual quota-limit raise once a
+  # human approves it.
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get, list, watch, patch]
   # Read and patch deployments to trace pod → deployment ownership and apply approved patches
   - apiGroups: [apps]
     resources: [deployments, replicasets, statefulsets, deployments/rollback]

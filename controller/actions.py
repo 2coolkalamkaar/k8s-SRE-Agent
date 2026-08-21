@@ -210,11 +210,135 @@ class DrainNodeAction(BaseAction):
         return False, "drain_node execute() not implemented"
 
 
+class PatchResourceQuotaAction(BaseAction):
+    """
+    Raises one or more resource limits on a namespace's ResourceQuota. Lower
+    blast-radius than node actions — it only affects future scheduling
+    decisions within one namespace, doesn't touch anything already running.
+    """
+
+    type_name = "patch_resourcequota"
+
+    async def dry_run(self, params: dict, context: dict) -> tuple[bool, str]:
+        namespace = params.get("namespace") or context.get("namespace")
+        quota_name = params.get("quota_name")
+        patch = params.get("patch", {})
+        if not namespace or not quota_name or not patch:
+            return False, "patch_resourcequota requires namespace, quota_name, and patch"
+        try:
+            core_api = k8s_client.CoreV1Api()
+            await core_api.patch_namespaced_resource_quota(
+                name=quota_name, namespace=namespace, body=patch, dry_run="All",
+            )
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    async def execute(self, params: dict, context: dict) -> tuple[bool, str]:
+        namespace = params.get("namespace") or context.get("namespace")
+        quota_name = params.get("quota_name")
+        patch = params.get("patch", {})
+        if not namespace or not quota_name or not patch:
+            return False, "patch_resourcequota requires namespace, quota_name, and patch"
+        try:
+            core_api = k8s_client.CoreV1Api()
+            await core_api.patch_namespaced_resource_quota(
+                name=quota_name, namespace=namespace, body=patch,
+            )
+            return True, f"Patched ResourceQuota {namespace}/{quota_name}"
+        except Exception as exc:
+            return False, str(exc)
+
+
+class RolloutRestartAction(BaseAction):
+    """Restarts every pod in a Deployment (rolling, no downtime) by
+    stamping a restart annotation — same mechanism PatchDeploymentAction
+    already uses for its base patch, just without any actual spec change
+    riding along with it."""
+
+    type_name = "rollout_restart"
+
+    def _restart_patch(self) -> dict:
+        return {
+            "spec": {"template": {"metadata": {"annotations": {
+                "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+            }}}}
+        }
+
+    async def dry_run(self, params: dict, context: dict) -> tuple[bool, str]:
+        namespace = params.get("namespace") or context.get("namespace")
+        deployment_name = params.get("deployment_name") or context.get("deployment_name")
+        if not namespace or not deployment_name:
+            return False, "rollout_restart requires namespace and deployment_name"
+        try:
+            apps_api = k8s_client.AppsV1Api()
+            await apps_api.patch_namespaced_deployment(
+                name=deployment_name, namespace=namespace, body=self._restart_patch(), dry_run="All",
+            )
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    async def execute(self, params: dict, context: dict) -> tuple[bool, str]:
+        namespace = params.get("namespace") or context.get("namespace")
+        deployment_name = params.get("deployment_name") or context.get("deployment_name")
+        if not namespace or not deployment_name:
+            return False, "rollout_restart requires namespace and deployment_name"
+        try:
+            apps_api = k8s_client.AppsV1Api()
+            await apps_api.patch_namespaced_deployment(
+                name=deployment_name, namespace=namespace, body=self._restart_patch(),
+            )
+            return True, f"Rolled out restart for {namespace}/{deployment_name}"
+        except Exception as exc:
+            return False, str(exc)
+
+
+class ScaleDeploymentAction(BaseAction):
+    """Changes a Deployment's replica count."""
+
+    type_name = "scale_deployment"
+
+    async def dry_run(self, params: dict, context: dict) -> tuple[bool, str]:
+        namespace = params.get("namespace") or context.get("namespace")
+        deployment_name = params.get("deployment_name") or context.get("deployment_name")
+        replicas = params.get("replicas")
+        if not namespace or not deployment_name or replicas is None:
+            return False, "scale_deployment requires namespace, deployment_name, and replicas"
+        try:
+            apps_api = k8s_client.AppsV1Api()
+            await apps_api.patch_namespaced_deployment(
+                name=deployment_name, namespace=namespace,
+                body={"spec": {"replicas": replicas}}, dry_run="All",
+            )
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    async def execute(self, params: dict, context: dict) -> tuple[bool, str]:
+        namespace = params.get("namespace") or context.get("namespace")
+        deployment_name = params.get("deployment_name") or context.get("deployment_name")
+        replicas = params.get("replicas")
+        if not namespace or not deployment_name or replicas is None:
+            return False, "scale_deployment requires namespace, deployment_name, and replicas"
+        try:
+            apps_api = k8s_client.AppsV1Api()
+            await apps_api.patch_namespaced_deployment(
+                name=deployment_name, namespace=namespace, body={"spec": {"replicas": replicas}},
+            )
+            return True, f"Scaled {namespace}/{deployment_name} to {replicas} replicas"
+        except Exception as exc:
+            return False, str(exc)
+
+
 # ── Registry: type_name -> action instance ─────────────────────────────────────
 _REGISTRY: dict[str, BaseAction] = {
     PatchDeploymentAction.type_name: PatchDeploymentAction(),
     CordonNodeAction.type_name: CordonNodeAction(),
     DrainNodeAction.type_name: DrainNodeAction(),
+    PatchResourceQuotaAction.type_name: PatchResourceQuotaAction(),
+    RolloutRestartAction.type_name: RolloutRestartAction(),
+    ScaleDeploymentAction.type_name: ScaleDeploymentAction(),
 }
 
 

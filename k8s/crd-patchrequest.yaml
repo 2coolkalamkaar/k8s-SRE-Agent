@@ -59,6 +59,9 @@ spec:
                 targetNode:
                   type: string
                   description: "Set instead of targetDeployment for domain=node incidents."
+                targetQuota:
+                  type: string
+                  description: "Set instead of targetDeployment for domain=cluster (ResourceQuota) incidents."
                 blastRadius:
                   type: string
                   description: "Human-readable impact estimate (e.g. '12 pods across 3 namespaces') — populated for node/cluster domains, shown prominently to the approver."
@@ -76,6 +79,11 @@ spec:
                     - MemoryPressure
                     - PIDPressure
                     - NetworkUnavailable
+                    - ResourceQuotaExceeded
+                    - ResourceQuotaNearLimit
+                    - HighErrorRate
+                    - HighLatency
+                    - AppDegraded
                 rootCause:
                   type: string
                   maxLength: 500

@@ -66,10 +66,32 @@ CREATE TABLE IF NOT EXISTS incident_metrics (
     recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Hash-chained, append-only audit log. Every human approval and every
+-- automatic action (rollback, auto-close) the agent takes gets one row
+-- here. entry_hash is computed from the row's own contents PLUS the
+-- previous row's entry_hash — tampering with any past row breaks the hash
+-- of every row after it, which is what makes this tamper-EVIDENT rather
+-- than just "a table nobody is supposed to edit." See controller/audit.py.
+-- This table is intentionally never UPDATEd or DELETEd from by the
+-- application — only ever INSERTed into.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              SERIAL PRIMARY KEY,
+    entry_hash      VARCHAR(64) UNIQUE NOT NULL,
+    prev_hash       VARCHAR(64) NOT NULL,
+    incident_id     VARCHAR(20),
+    action_type     VARCHAR(50) NOT NULL,            -- 'approval', 'rollback', 'auto_close'
+    actor           VARCHAR(100) NOT NULL,           -- human email, or 'system' for automatic actions
+    reason          TEXT,
+    payload         JSONB,
+    recorded_at     TIMESTAMPTZ NOT NULL
+);
+
 -- Indexes for query & dashboard performance
 CREATE INDEX IF NOT EXISTS idx_incidents_state ON incidents(state);
 CREATE INDEX IF NOT EXISTS idx_incidents_opened_at ON incidents(opened_at);
 CREATE INDEX IF NOT EXISTS idx_incidents_deployment ON incidents(target_deployment);
 CREATE INDEX IF NOT EXISTS idx_incidents_error ON incidents(error_state);
 CREATE INDEX IF NOT EXISTS idx_incidents_fingerprint ON incidents(error_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_audit_log_incident ON audit_log(incident_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_recorded_at ON audit_log(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_transitions_incident ON state_transitions(incident_id);

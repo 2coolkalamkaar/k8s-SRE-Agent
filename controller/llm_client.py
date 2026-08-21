@@ -292,6 +292,234 @@ async def diagnose_node_incident(node_context: dict, incident_id: str) -> dict:
     }
 
 
+class ClusterAnalystAgent:
+    """Domain-specific Analyst for cluster-scoped resource problems — right
+    now, ResourceQuota pressure/exhaustion within a namespace. Kept separate
+    from the pod/node Analysts for the same reason they're separate from
+    each other: the questions here are about capacity accounting within a
+    namespace, not container logs or node health."""
+
+    @staticmethod
+    async def analyze(quota_context: dict, incident_id: str) -> dict:
+        prompt = f"""You are an expert Kubernetes SRE analyzing a ResourceQuota problem
+in a namespace (not a pod or node — a namespace-level resource limit).
+Respond in valid JSON format: {{"root_cause": "exact reason", "severity": "low|medium|high|critical", "likely_recurring": true, "estimated_impact": "impact"}}
+
+=== RESOURCE QUOTA ===
+Namespace: {quota_context.get('namespace')}
+Quota name: {quota_context.get('quota_name')}
+Problem: {quota_context.get('condition')}
+Used:  {json.dumps(quota_context.get('used', {}), indent=2)}
+Hard limit: {json.dumps(quota_context.get('hard', {}), indent=2)}
+"""
+        raw = await _generate_content(prompt, incident_id)
+        return _parse_json(raw)
+
+
+class ClusterFixerAgent:
+    """Proposes an action plan for a ResourceQuota problem. The only
+    available move today is raising the specific limit(s) that are
+    constrained — there's no equivalent of 'cordon' or 'drain' for a quota,
+    it's a much simpler decision than the node domain."""
+
+    @staticmethod
+    async def propose_fix(rca: dict, quota_context: dict, incident_id: str) -> dict:
+        prompt = f"""You are an expert Kubernetes Infrastructure Engineer deciding how to
+respond to a ResourceQuota problem. You can ONLY propose raising the specific
+hard limit(s) that are constrained — do not propose lowering usage or
+touching any Deployment.
+
+Respond in valid JSON: {{"suggested_fix_description": "plain-language description",
+"actions": [{{"type": "patch_resourcequota", "params": {{"patch": {{"spec": {{"hard": {{"<resource-key>": "<new-higher-value>"}}}}}}}}}}]}}
+(namespace and quota_name will be filled in automatically — do not include them)
+Only raise the specific resource key(s) that are actually near/at their limit —
+leave every other key in the quota untouched. If you cannot determine a safe
+new value, return {{"actions": []}}.
+
+=== ROOT CAUSE ANALYSIS ===
+{json.dumps(rca, indent=2)}
+
+=== RESOURCE QUOTA CONTEXT ===
+{json.dumps(quota_context, indent=2)}
+"""
+        raw = await _generate_content(prompt, incident_id)
+        return _parse_json(raw)
+
+
+async def diagnose_cluster_incident(quota_context: dict, incident_id: str) -> dict:
+    """Cluster-domain counterpart to diagnose_incident()/diagnose_node_incident().
+    Same shape as the node pipeline (no Fixer retry loop — a quota patch is
+    simple enough not to need one yet), kept as its own function for the
+    same reason: the domains share almost no logic."""
+    logger.info("[%s] Starting Cluster Remediation Pipeline (domain=cluster)", incident_id)
+
+    try:
+        rca = await ClusterAnalystAgent.analyze(quota_context, incident_id)
+        logger.info("[%s] Cluster Analyst RCA: %s", incident_id, rca.get("root_cause", "N/A"))
+    except Exception as exc:
+        logger.error("[%s] Cluster Analyst Agent failed with exception: %s", incident_id, exc)
+        rca = {}
+
+    try:
+        fix_result = await ClusterFixerAgent.propose_fix(rca, quota_context, incident_id)
+    except Exception as exc:
+        logger.error("[%s] Cluster Fixer Agent failed with exception: %s", incident_id, exc)
+        fix_result = {}
+
+    proposed_actions = fix_result.get("actions", [])
+    for action in proposed_actions:
+        params = action.setdefault("params", {})
+        params["namespace"] = quota_context.get("namespace")
+        params["quota_name"] = quota_context.get("quota_name")
+
+    validated = False
+    if proposed_actions:
+        logger.info("[%s] Validator Agent dry-running cluster action plan", incident_id)
+        is_valid, error_msg = await ValidatorAgent.validate_actions(
+            quota_context.get("namespace"), None, proposed_actions
+        )
+        if is_valid:
+            logger.info("[%s] ✅ Validator Agent approved cluster action plan", incident_id)
+            validated = True
+        else:
+            logger.warning("[%s] ❌ Validator Agent rejected cluster action plan: %s", incident_id, error_msg)
+
+    return {
+        "root_cause": rca.get("root_cause", "Analysis failed"),
+        "severity": rca.get("severity", "high"),
+        "suggested_fix": fix_result.get("suggested_fix_description", "Manual investigation required."),
+        "auto_restart_safe": False,
+        "config_suggestions": [],
+        "likely_recurring": rca.get("likely_recurring", False),
+        "estimated_impact": rca.get("estimated_impact", "Unknown"),
+        "matches_past_incident": None,
+        "confidence_boost": "high" if validated else "none",
+        "proposed_patch": {},
+        "proposed_actions": proposed_actions if validated else [],
+        "blast_radius": f"1 namespace ({quota_context.get('namespace')}) — future scheduling only, "
+                         f"no running workloads affected",
+    }
+
+
+class AppAnalystAgent:
+    """Domain-specific Analyst for behavioral app problems — a deployment
+    that's technically running (no crashing pods, nothing the pod-domain
+    watcher would ever notice) but degraded: elevated error rate, high
+    latency, whatever a Prometheus alert caught. There are no crash logs to
+    read here — the only signal is the alert itself, which is why this
+    can't reuse the pod-domain Analyst's prompt."""
+
+    @staticmethod
+    async def analyze(alert_context: dict, incident_id: str) -> dict:
+        prompt = f"""You are an expert Kubernetes SRE analyzing a Prometheus alert about an
+application that is running (not crashing) but behaving badly — e.g. high
+error rate or high latency. There are no crash logs; reason from the alert
+itself and the deployment's current state.
+Respond in valid JSON format: {{"root_cause": "best-guess reason based on the alert", "severity": "low|medium|high|critical", "likely_recurring": true, "estimated_impact": "impact"}}
+
+=== ALERT ===
+Name: {alert_context.get('alert_name')}
+Namespace: {alert_context.get('namespace')}
+Deployment: {alert_context.get('deployment')}
+Description: {alert_context.get('description')}
+Labels: {json.dumps(alert_context.get('labels', {}), indent=2)}
+
+=== DEPLOYMENT STATE ===
+Current replicas: {alert_context.get('replicas')}
+"""
+        raw = await _generate_content(prompt, incident_id)
+        return _parse_json(raw)
+
+
+class AppFixerAgent:
+    """Proposes an action plan for a behavioral app problem. Deliberately
+    limited to two blunt, well-understood instruments — restart the pods,
+    or scale the deployment — rather than anything that requires guessing
+    at application code. A wrong guess about *why* an app is slow is much
+    more likely than a wrong guess about whether restarting or scaling it
+    is a reasonable thing to try."""
+
+    @staticmethod
+    async def propose_fix(rca: dict, alert_context: dict, incident_id: str) -> dict:
+        prompt = f"""You are an expert Kubernetes Infrastructure Engineer deciding how to
+respond to a degraded (not crashing) application. You can ONLY choose from:
+  - "rollout_restart": restarts all pods in the deployment (rolling, no downtime).
+    Good for transient degradation, memory creep, stuck connections.
+  - "scale_deployment": increases replica count. Good if the root cause looks
+    like the deployment is simply under-provisioned for its current load.
+
+Respond in valid JSON: {{"suggested_fix_description": "plain-language description",
+"actions": [{{"type": "rollout_restart", "params": {{}}}}]}}
+For scale_deployment, params must include a "replicas" integer.
+If neither action is clearly warranted, return {{"actions": []}}.
+
+=== ROOT CAUSE ANALYSIS ===
+{json.dumps(rca, indent=2)}
+
+=== ALERT CONTEXT ===
+{json.dumps(alert_context, indent=2)}
+"""
+        raw = await _generate_content(prompt, incident_id)
+        return _parse_json(raw)
+
+
+async def diagnose_app_incident(alert_context: dict, incident_id: str) -> dict:
+    """App-domain counterpart to the other diagnose_*_incident functions.
+    Unlike node/cluster, this domain's actions target a real Deployment in
+    a real namespace — so unlike those two, this one CAN plug into the
+    existing outcome_checker health-observation loop for free (the caller
+    in main.py sets observationStartTime when applying, same as the
+    original pod/deployment path)."""
+    logger.info("[%s] Starting App Remediation Pipeline (domain=app)", incident_id)
+
+    try:
+        rca = await AppAnalystAgent.analyze(alert_context, incident_id)
+        logger.info("[%s] App Analyst RCA: %s", incident_id, rca.get("root_cause", "N/A"))
+    except Exception as exc:
+        logger.error("[%s] App Analyst Agent failed with exception: %s", incident_id, exc)
+        rca = {}
+
+    try:
+        fix_result = await AppFixerAgent.propose_fix(rca, alert_context, incident_id)
+    except Exception as exc:
+        logger.error("[%s] App Fixer Agent failed with exception: %s", incident_id, exc)
+        fix_result = {}
+
+    proposed_actions = fix_result.get("actions", [])
+    for action in proposed_actions:
+        params = action.setdefault("params", {})
+        params["namespace"] = alert_context.get("namespace")
+        params["deployment_name"] = alert_context.get("deployment")
+
+    validated = False
+    if proposed_actions:
+        logger.info("[%s] Validator Agent dry-running app action plan", incident_id)
+        is_valid, error_msg = await ValidatorAgent.validate_actions(
+            alert_context.get("namespace"), alert_context.get("deployment"), proposed_actions
+        )
+        if is_valid:
+            logger.info("[%s] ✅ Validator Agent approved app action plan", incident_id)
+            validated = True
+        else:
+            logger.warning("[%s] ❌ Validator Agent rejected app action plan: %s", incident_id, error_msg)
+
+    return {
+        "root_cause": rca.get("root_cause", "Analysis failed"),
+        "severity": rca.get("severity", "high"),
+        "suggested_fix": fix_result.get("suggested_fix_description", "Manual investigation required."),
+        "auto_restart_safe": True,
+        "config_suggestions": [],
+        "likely_recurring": rca.get("likely_recurring", False),
+        "estimated_impact": rca.get("estimated_impact", "Unknown"),
+        "matches_past_incident": None,
+        "confidence_boost": "high" if validated else "none",
+        "proposed_patch": {},
+        "proposed_actions": proposed_actions if validated else [],
+        "blast_radius": f"{alert_context.get('replicas', '?')} replica(s) in "
+                         f"{alert_context.get('namespace')}/{alert_context.get('deployment')}",
+    }
+
+
 # ── Orchestrator ───────────────────────────────────────────────────────────────
 
 async def diagnose_incident(

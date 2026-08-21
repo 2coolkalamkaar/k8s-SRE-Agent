@@ -14,6 +14,7 @@ from kubernetes_asyncio import client as k8s_client, config as k8s_config
 
 import controller.telemetry as telemetry
 import controller.db as db
+import controller.audit as audit
 from controller.dedup import clear_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,16 @@ async def _execute_rollback(deployment_name: str, target_namespace: str, pr_name
         if incident_id:
             await db.mark_incident_outcome(incident_id, worked=False)
 
+        # Audit: this is the agent acting on its own, no human in the loop —
+        # actor="system" distinguishes it from a human-approval entry.
+        await audit.record(
+            incident_id=incident_id,
+            action_type="rollback",
+            actor="system",
+            reason=f"Patch applied to {namespace}/{deployment_name} did not resolve the incident: {crash_reason}",
+            payload={"patchrequest": pr_name, "deployment": deployment_name, "namespace": target_namespace},
+        )
+
     except Exception as exc:
         logger.error("[outcome] Rollback failed for %s: %s", pr_name, exc)
     finally:
@@ -141,7 +152,16 @@ async def _close_incident(body: dict, pr_name: str, namespace: str, elapsed: flo
             telemetry.mttr_histogram.record(elapsed)
         if incident_id:
             await db.mark_incident_outcome(incident_id, worked=True, mttr_seconds=int(elapsed))
-            
+
+        await audit.record(
+            incident_id=incident_id,
+            action_type="auto_close",
+            actor="system",
+            reason=f"Deployment healthy for {int(elapsed)}s — outcome confirmed, incident closed",
+            payload={"patchrequest": pr_name, "namespace": namespace, "mttr_seconds": int(elapsed)},
+        )
+
+
     except Exception as exc:
         logger.error("[outcome] Failed to close incident %s: %s", pr_name, exc)
     finally:
@@ -160,11 +180,13 @@ async def outcome_checker_timer(body, name, namespace, logger, **kwargs):
 
     spec = body.get("spec", {})
 
-    # Node-domain PatchRequests have no Deployment to health-check, and a
-    # cordoned node doesn't "resolve" on its own the way a pod restart does
-    # — it stays Applied until a human closes it once satisfied (e.g. after
-    # replacing hardware). Auto-observation for this domain is deferred.
-    if spec.get("domain") == "node":
+    # Node/cluster-domain PatchRequests have no Deployment to health-check.
+    # A cordoned node doesn't "resolve" on its own the way a pod restart
+    # does — it stays Applied until a human closes it (e.g. after replacing
+    # hardware). A quota patch's effect is immediate at apply time, not
+    # something to observe over 60s. Auto-observation for both domains is
+    # deferred.
+    if spec.get("domain") in ("node", "cluster"):
         return
 
     deployment_name = spec.get("targetDeployment")

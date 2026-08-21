@@ -30,6 +30,7 @@ _SOURCE_TO_DOMAIN = {
     "pod_status": Domain.POD,
     "init_container_status": Domain.POD,
     "node_condition": Domain.NODE,
+    "resourcequota_status": Domain.CLUSTER,
     "cluster_event": Domain.CLUSTER,
     "prometheus_alert": Domain.APP,
 }
